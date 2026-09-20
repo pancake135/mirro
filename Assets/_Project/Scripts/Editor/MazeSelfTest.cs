@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using UnityEditor;
 using UnityEngine;
+using Mirro.Gameplay;
 using Mirro.Maze;
 using Debug = UnityEngine.Debug;
 
@@ -51,6 +52,8 @@ namespace Mirro.EditorTools
             allOk &= TestBuild(200);
             allOk &= TestBuild(50);
             allOk &= TestSpawnPlacement();
+            allOk &= TestBots();
+            allOk &= TestTreasures();
 
             Debug.Log(allOk ? "[MirroTest] ALL PASSED" : "[MirroTest] SOME TESTS FAILED");
             return allOk;
@@ -234,6 +237,110 @@ namespace Mirro.EditorTools
                     allOk &= Report(failures == 0, line);
                 }
             }
+            return allOk;
+        }
+
+        /// <summary>봇 경로 탐색/계획 검증(물리 없이): 경로가 이어지고 최단인지, 추격형이 가장 가까운 깃발로 향하는지, 탐색형이 멀리 있는 깃발도 찾는지.</summary>
+        private static bool TestBots()
+        {
+            bool allOk = true;
+            var maze = MazeGenerator.Generate(50, 909);
+            int cells = maze.Cells.Length;
+            var finder = new BotPathfinder(maze);
+            var path = new List<int>();
+
+            int from = maze.Index(3, 4);
+            int[] dist = SpawnPlacer.PathDistances(maze, new Vector2Int(3, 4));
+            int far = 0;
+            for (int i = 1; i < cells; i++) if (dist[i] > dist[far]) far = i;
+
+            bool found = finder.TryFindPath(from, c => c == far, int.MaxValue, null, path);
+            bool contiguous = found && path.Count == dist[far] && path[path.Count - 1] == far;
+            int previous = from;
+            foreach (int c in path)
+            {
+                int dx = Mathf.Abs(c % 50 - previous % 50), dy = Mathf.Abs(c / 50 - previous / 50);
+                if (dx + dy != 1) contiguous = false;
+                previous = c;
+            }
+            allOk &= Report(contiguous, $"[MirroTest] bots: path to the farthest cell is contiguous and shortest ({path.Count} steps)");
+
+            bool limited = !finder.TryFindPath(from, c => c == far, 5, null, path) && path.Count == 0;
+            allOk &= Report(limited, "[MirroTest] bots: max depth is respected");
+            allOk &= Report(finder.TryFindPath(from, c => c == from, 0, null, path) && path.Count == 0,
+                "[MirroTest] bots: standing on the goal gives an empty path");
+
+            // 추격형: 가장 가까운 남의 깃발까지 최단 경로로 향한다.
+            var flags = new Dictionary<int, ulong> { { far, 1001UL }, { maze.Index(40, 3), 1002UL }, { maze.Index(10, 45), 1003UL } };
+            int nearest = int.MaxValue;
+            foreach (var pair in flags) nearest = Mathf.Min(nearest, dist[pair.Key]);
+            var chaser = new BotPlanner(maze, BotSettings.For(BotDifficulty.Hard), 1);
+            chaser.MarkVisited(from);
+            chaser.Plan(from, flags);
+            bool chasing = chaser.IsChasing && chaser.Path.Count == nearest && flags[chaser.Path[chaser.Path.Count - 1]] == chaser.TargetFlagId;
+            allOk &= Report(chasing, $"[MirroTest] bots: chaser heads for the nearest flag ({chaser.Path.Count} steps, expected {nearest})");
+
+            // 탐색형: 멀리 있는 깃발도 결국 스스로 발견해서 쫓아간다(칸 수의 3배 안에).
+            var explorer = new BotPlanner(maze, BotSettings.For(BotDifficulty.Easy), 2);
+            var farFlag = new Dictionary<int, ulong> { { far, 1001UL } };
+            int at = from, steps = 0, index = 0;
+            explorer.MarkVisited(at);
+            explorer.Plan(at, farFlag);
+            while (at != far && steps < cells * 3)
+            {
+                if (index >= explorer.Path.Count || (!explorer.IsChasing && steps % 3 == 0))
+                {
+                    explorer.Plan(at, farFlag);
+                    index = 0;
+                    if (explorer.Path.Count == 0) break;
+                }
+                at = explorer.Path[index++];
+                explorer.MarkVisited(at);
+                steps++;
+            }
+            allOk &= Report(at == far, $"[MirroTest] bots: explorer finds the far flag on its own ({steps} steps, {cells} cells)");
+            return allOk;
+        }
+
+        /// <summary>금색 깃발 배치(개수/중복 없음/결정적/간격/시작 칸에서 떨어짐)와 최고 기록 저장 검증.</summary>
+        private static bool TestTreasures()
+        {
+            bool allOk = true;
+            foreach (int size in new[] { 50, 100, 200 })
+            {
+                int count = size / 10;
+                var maze = MazeGenerator.Generate(size, 5150 + size);
+                var avoid = new Vector2Int(size / 2, size / 2);
+                var cells = SpawnPlacer.PlaceTreasures(maze, count, avoid);
+                var again = SpawnPlacer.PlaceTreasures(maze, count, avoid);
+
+                bool distinct = cells.Length == count && new HashSet<Vector2Int>(cells).Count == count;
+                bool deterministic = cells.Length == again.Length;
+                for (int i = 0; deterministic && i < cells.Length; i++) deterministic = cells[i] == again[i];
+
+                float minSpacing = float.MaxValue, minFromStart = float.MaxValue;
+                for (int i = 0; i < cells.Length; i++)
+                {
+                    minFromStart = Mathf.Min(minFromStart, Vector2Int.Distance(cells[i], avoid));
+                    for (int j = i + 1; j < cells.Length; j++)
+                        minSpacing = Mathf.Min(minSpacing, Vector2Int.Distance(cells[i], cells[j]));
+                    if (!maze.InBounds(cells[i].x, cells[i].y)) distinct = false;
+                }
+                bool spread = minSpacing >= size * 0.16f * 0.8f - 0.01f && minFromStart >= size * 0.15f * 0.8f - 0.01f;
+                allOk &= Report(distinct && deterministic && spread,
+                    $"[MirroTest] treasures size {size}: {count} distinct, deterministic, spread (min spacing {minSpacing:F1}, from start {minFromStart:F1})");
+            }
+
+            const int probeSize = 999;
+            string key = "mirro.treasure.best." + probeSize;
+            PlayerPrefs.DeleteKey(key);
+            bool first = TreasureRecords.Submit(probeSize, 120f, out float prev0);
+            bool slower = TreasureRecords.Submit(probeSize, 150f, out float prev1);
+            bool faster = TreasureRecords.Submit(probeSize, 100f, out float prev2);
+            bool ok = first && prev0 == 0f && !slower && prev1 == 120f && faster && prev2 == 120f
+                      && Mathf.Approximately(TreasureRecords.Best(probeSize), 100f);
+            PlayerPrefs.DeleteKey(key);
+            allOk &= Report(ok, "[MirroTest] treasure records keep only the best time");
             return allOk;
         }
 

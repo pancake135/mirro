@@ -20,7 +20,46 @@ namespace Mirro.Maze
         // 미로 생성기와 같은 seed를 쓰되 난수열이 겹치지 않도록 섞는 값.
         private const int SeedSalt = 0x51A9C3D7;
 
+        private const int TreasureSeedSalt = 0x2545F491;
+
         private static readonly WallSide[] Sides = { WallSide.North, WallSide.East, WallSide.South, WallSide.West };
+
+        /// <summary>
+        /// 금색 깃발 칸을 count개 고른다. 서로 미로 한 변의 16% 이상, avoid(시작 칸)에서 15% 이상 떨어지게 무작위로 고르고,
+        /// 자리가 모자라면 조건을 80%씩 낮춘다. (미로, count, avoid)만으로 결정되어 어느 피어에서 계산해도 같다.
+        /// </summary>
+        public static Vector2Int[] PlaceTreasures(MazeData maze, int count, Vector2Int avoid)
+        {
+            count = Mathf.Clamp(count, 0, maze.Cells.Length - 1);
+            var result = new List<Vector2Int>(count);
+            var rng = new DeterministicRandom(maze.Seed ^ TreasureSeedSalt);
+            for (int i = 0; i < 8; i++) rng.NextFloat01();
+
+            float side = Mathf.Min(maze.Width, maze.Height);
+            float spacing = Mathf.Max(4f, side * 0.16f);
+            float fromStart = side * 0.15f;
+
+            while (result.Count < count)
+            {
+                for (int attempt = 0; attempt < 400 && result.Count < count; attempt++)
+                {
+                    var cell = new Vector2Int(rng.NextInt(0, maze.Width), rng.NextInt(0, maze.Height));
+                    if (Vector2Int.Distance(cell, avoid) < fromStart) continue;
+
+                    bool ok = true;
+                    foreach (var other in result)
+                    {
+                        if (Vector2Int.Distance(cell, other) >= spacing) continue;
+                        ok = false;
+                        break;
+                    }
+                    if (ok) result.Add(cell);
+                }
+                spacing = Mathf.Max(0.5f, spacing * 0.8f);
+                fromStart *= 0.8f;
+            }
+            return result.ToArray();
+        }
 
         /// <summary>
         /// count개의 서로 다른 시작 칸을 고른다. 첫 칸은 무작위이고, 나머지는 이미 고른 칸들과의 경로 거리가
