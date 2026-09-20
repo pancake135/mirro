@@ -95,8 +95,12 @@ namespace Mirro.Core
         {
             var theme = ThemeLibrary.Get(fallbackSeason);
             GameSession.Begin(theme, mazeSize, seed);
-            if (NetworkFlow.Instance.HostRoom(theme, mazeSize))
+            // 메뉴 없이 Game 씬을 직접 실행하면 혼자 하기 방(자유 연습)으로 연다.
+            if (NetworkFlow.Instance.HostRoom(theme, mazeSize, NetworkFlow.DefaultPort, solo: true))
+            {
+                NetworkSession.Instance.ConfigureSolo(GameMode.Practice, 0, BotDifficulty.Normal);
                 NetworkSession.Instance.ForceInGame();
+            }
         }
 
         private IEnumerator SpawnAfterTimeout()

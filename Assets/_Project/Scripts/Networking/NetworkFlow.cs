@@ -60,13 +60,16 @@ namespace Mirro.Networking
         /// <summary>내가 방장으로 연 방의 게임 포트(LAN 검색 알림에 실린다).</summary>
         public ushort HostPort { get; private set; } = DefaultPort;
 
-        public bool HostRoom(MazeThemeConfig theme, int size, ushort port = DefaultPort)
+        public bool HostRoom(MazeThemeConfig theme, int size, ushort port = DefaultPort, bool solo = false)
         {
             if (!PrepareManager()) return false;
 
             var nm = NetworkManager.Singleton;
             var transport = nm.GetComponent<UnityTransport>();
-            transport.SetConnectionData("127.0.0.1", port, ListenAddress);
+            // 혼자 하기 방은 내 PC 안에서만 열고(방화벽 창/외부 접속 없음), 이미 쓰는 포트는 피해 빈 포트를 고른다.
+            string listen = solo ? "127.0.0.1" : ListenAddress;
+            if (solo) port = FindFreeLoopbackPort(port);
+            transport.SetConnectionData("127.0.0.1", port, listen);
             nm.ConnectionApprovalCallback = ApproveConnection;
             HostPort = port;
 
@@ -91,9 +94,25 @@ namespace Mirro.Networking
             Status = ConnectionStatus.Connected;
             FailureReason = null;
 
-            // 방 정보를 LAN에 알리는 오브젝트는 처음 접근할 때 생성되므로 방장도 여기서 만들어 둔다.
-            LanDiscovery.EnsureExists();
+            // 방 정보를 LAN에 알리는 오브젝트는 처음 접근할 때 생성되므로 방장도 여기서 만들어 둔다(혼자 하기 방은 알리지 않는다).
+            if (!solo) LanDiscovery.EnsureExists();
             return true;
+        }
+
+        private static ushort FindFreeLoopbackPort(ushort start)
+        {
+            for (ushort p = start; p < start + 10; p++)
+            {
+                try
+                {
+                    using (new UdpClient(new IPEndPoint(IPAddress.Loopback, p))) return p;
+                }
+                catch (SocketException)
+                {
+                    // 이미 쓰는 포트면 다음 포트를 시도한다.
+                }
+            }
+            return start;
         }
 
         public bool JoinRoom(string address, ushort port = DefaultPort)
@@ -209,6 +228,13 @@ namespace Mirro.Networking
             }
 
             var session = NetworkSession.Instance;
+            if (session != null && session.IsSolo.Value)
+            {
+                response.Approved = false;
+                response.Reason = "혼자 하기 방이에요.";
+                return;
+            }
+
             if (session == null || session.CurrentPhase != SessionPhase.Lobby)
             {
                 response.Approved = false;

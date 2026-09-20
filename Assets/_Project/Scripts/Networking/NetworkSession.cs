@@ -31,6 +31,12 @@ namespace Mirro.Networking
         public readonly NetworkVariable<int> MazeSize = new NetworkVariable<int>(50);
         public readonly NetworkVariable<int> Phase = new NetworkVariable<int>((int)SessionPhase.Lobby);
 
+        // 혼자 하기 설정. 멀티(Versus) 방에서는 기본값 그대로 쓰지 않는다.
+        public readonly NetworkVariable<int> Mode = new NetworkVariable<int>((int)GameMode.Versus);
+        public readonly NetworkVariable<int> BotCount = new NetworkVariable<int>(3);
+        public readonly NetworkVariable<int> BotDifficulty = new NetworkVariable<int>((int)Mirro.Gameplay.BotDifficulty.Normal);
+        public readonly NetworkVariable<bool> IsSolo = new NetworkVariable<bool>();
+
         public NetworkList<PlayerSlot> Slots;
 
         /// <summary>서버 전용: 모든 슬롯의 클라이언트가 게임 씬 준비를 마쳤을 때 한 번 발생한다.</summary>
@@ -77,6 +83,8 @@ namespace Mirro.Networking
         }
 
         public SessionPhase CurrentPhase => (SessionPhase)Phase.Value;
+
+        public GameMode CurrentMode => (GameMode)Mode.Value;
 
         public MazeThemeConfig Theme => ThemeLibrary.All[Mathf.Clamp(ThemeIndex.Value, 0, ThemeLibrary.All.Count - 1)];
 
@@ -141,14 +149,7 @@ namespace Mirro.Networking
         {
             if (!IsServer || CurrentPhase != SessionPhase.InGame) return false;
 
-            foreach (var flag in Flag.All.ToArray())
-                if (flag.IsSpawned) flag.NetworkObject.Despawn(true);
-
-            var match = MatchManager.Instance;
-            if (match != null && match.IsSpawned) match.NetworkObject.Despawn(true);
-
-            foreach (var player in NetworkPlayer.All.ToArray())
-                if (player.IsSpawned) player.NetworkObject.Despawn(true);
+            DespawnGameObjects();
 
             _sceneReady.Clear();
             _allReadyRaised = false;
@@ -162,6 +163,50 @@ namespace Mirro.Networking
             Phase.Value = (int)SessionPhase.Lobby;
             ReturnToLobbyRpc();
             return true;
+        }
+
+        /// <summary>서버 전용: 서버가 먼저 깃발/매치/플레이어(봇 포함)를 치워 모든 피어에 알린 뒤 씬을 바꾼다.</summary>
+        private void DespawnGameObjects()
+        {
+            foreach (var flag in Flag.All.ToArray())
+                if (flag.IsSpawned) flag.NetworkObject.Despawn(true);
+
+            var match = MatchManager.Instance;
+            if (match != null && match.IsSpawned) match.NetworkObject.Despawn(true);
+
+            foreach (var player in NetworkPlayer.All.ToArray())
+                if (player.IsSpawned) player.NetworkObject.Despawn(true);
+        }
+
+        /// <summary>서버 전용: 혼자 하기 방으로 설정한다(방을 만든 직후, 시작 전에 호출).</summary>
+        public void ConfigureSolo(GameMode mode, int botCount, Mirro.Gameplay.BotDifficulty difficulty)
+        {
+            if (!IsServer) return;
+            IsSolo.Value = true;
+            Mode.Value = (int)mode;
+            BotCount.Value = Mathf.Clamp(botCount, 1, MaxPlayers - 1);
+            BotDifficulty.Value = (int)difficulty;
+        }
+
+        /// <summary>서버 전용: 준비/최소 인원 검사 없이 혼자 하기 게임을 바로 시작한다(새 seed).</summary>
+        public bool StartSoloGame()
+        {
+            if (!IsServer || !IsSolo.Value || Slots.Count == 0) return false;
+
+            Phase.Value = (int)SessionPhase.InGame;
+            _sceneReady.Clear();
+            _allReadyRaised = false;
+            BeginGameRpc(ThemeIndex.Value, MazeSize.Value, UnityEngine.Random.Range(1, int.MaxValue));
+            return true;
+        }
+
+        /// <summary>서버 전용: 같은 설정으로 새 미로에서 혼자 하기 게임을 처음부터 다시 시작한다.</summary>
+        public bool RestartSolo()
+        {
+            if (!IsServer || !IsSolo.Value || CurrentPhase != SessionPhase.InGame) return false;
+
+            DespawnGameObjects();
+            return StartSoloGame();
         }
 
         private void AddSlot(ulong clientId)

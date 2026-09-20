@@ -188,7 +188,7 @@ namespace Mirro.Networking
             if (!Enabled || !NetworkFlow.IsRunning || !NetworkManager.Singleton.IsServer) return;
 
             var session = NetworkSession.Instance;
-            if (session == null || session.CurrentPhase != SessionPhase.Lobby ||
+            if (session == null || session.IsSolo.Value || session.CurrentPhase != SessionPhase.Lobby ||
                 session.Slots.Count >= NetworkSession.MaxPlayers)
                 return;
 
