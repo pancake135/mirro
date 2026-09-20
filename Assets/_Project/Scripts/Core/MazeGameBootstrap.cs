@@ -125,8 +125,11 @@ namespace Mirro.Core
             foreach (var slot in session.Slots)
                 if (session.IsSceneReady(slot.clientId)) slots.Add(slot);
 
+            var mode = session.CurrentMode;
+            int botCount = mode == GameMode.Bots ? session.BotCount.Value : 0;
+
             var timer = System.Diagnostics.Stopwatch.StartNew();
-            var cells = SpawnPlacer.Place(Maze, slots.Count);
+            var cells = SpawnPlacer.Place(Maze, slots.Count + botCount);
             string spacing = cells.Length > 1
                 ? $"; closest pair is {SpawnPlacer.MinPairwisePathDistance(Maze, cells)} cells apart by path"
                 : string.Empty;
@@ -153,9 +156,73 @@ namespace Mirro.Core
                 });
             }
 
+            SpawnBots(prefab, slots, cells, botCount, session, matchPlayers);
+
+            var treasures = new List<TreasureFlag>();
+            if (mode == GameMode.Treasure)
+            {
+                var treasureCells = SpawnPlacer.PlaceTreasures(Maze, Mathf.Max(1, GameSession.MazeSize / 10), cells[0]);
+                for (int i = 0; i < treasureCells.Length; i++)
+                {
+                    float yaw = (i % 4) * 90f;
+                    Vector3 center = SpawnPlacer.CellCenter(treasureCells[i], cellSize);
+                    treasures.Add(new TreasureFlag
+                    {
+                        id = MatchManager.TreasureIdBase + (ulong)i,
+                        position = new Vector3(center.x, 0f, center.z) + Quaternion.Euler(0f, yaw, 0f) * new Vector3(-0.9f, 0f, -0.9f),
+                        yaw = yaw
+                    });
+                }
+            }
+
             var matchGo = Instantiate(Resources.Load<GameObject>("Prefabs/MatchManager"));
             matchGo.GetComponent<NetworkObject>().Spawn(true);
-            matchGo.GetComponent<MatchManager>().ServerBegin(matchPlayers);
+            matchGo.GetComponent<MatchManager>().ServerBegin(mode, matchPlayers, treasures);
+        }
+
+        /// <summary>봇을 사람 다음 시작 칸에 세운다. 서버가 소유하고 BotBrain이 조종하며, 색은 사람이 쓰지 않는 색을 순서대로 받는다.</summary>
+        private void SpawnBots(GameObject prefab, List<PlayerSlot> slots, Vector2Int[] cells, int botCount, NetworkSession session,
+            List<MatchPlayer> matchPlayers)
+        {
+            var usedColors = new HashSet<int>();
+            foreach (var slot in slots) usedColors.Add(slot.colorIndex);
+
+            var difficulty = (BotDifficulty)session.BotDifficulty.Value;
+            var botControllers = new List<CharacterController>();
+            for (int b = 0; b < botCount; b++)
+            {
+                int color = 0;
+                while (usedColors.Contains(color)) color++;
+                usedColors.Add(color);
+
+                Vector2Int cell = cells[slots.Count + b];
+                Vector3 pos = SpawnPlacer.CellCenter(cell, cellSize);
+                Quaternion rot = SpawnPlacer.FacingOpenSide(Maze, cell);
+                ulong botId = MatchManager.BotIdBase + (ulong)b;
+
+                var botGo = Instantiate(prefab, pos, rot);
+                var bot = botGo.GetComponent<NetworkPlayer>();
+                bot.InitServer(pos, rot.eulerAngles.y);
+                bot.InitBot(botId);
+                botGo.GetComponent<NetworkObject>().Spawn(true);
+                bot.ColorIndex.Value = color;
+                botGo.AddComponent<BotBrain>().Init(bot, Maze, cellSize, difficulty, Maze.Seed + b * 7919);
+                botControllers.Add(botGo.GetComponent<CharacterController>());
+
+                matchPlayers.Add(new MatchPlayer
+                {
+                    clientId = botId,
+                    colorIndex = color,
+                    flagPosition = MatchManager.FlagPositionFor(pos, rot),
+                    flagYaw = rot.eulerAngles.y
+                });
+                Debug.Log($"[Mirro] Spawned bot {botId} ({difficulty}) in cell {cell}");
+            }
+
+            // 복도에서 봇끼리 마주쳐 서로 막지 않도록 봇끼리는 충돌을 무시한다(사람과는 그대로 충돌한다).
+            for (int i = 0; i < botControllers.Count; i++)
+                for (int j = i + 1; j < botControllers.Count; j++)
+                    Physics.IgnoreCollision(botControllers[i], botControllers[j]);
         }
 
         private void OnLocalPlayerSpawned(NetworkPlayer player)

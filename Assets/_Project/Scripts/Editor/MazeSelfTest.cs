@@ -288,11 +288,15 @@ namespace Mirro.EditorTools
             explorer.Plan(at, farFlag);
             while (at != far && steps < cells * 3)
             {
-                if (index >= explorer.Path.Count || (!explorer.IsChasing && steps % 3 == 0))
+                if (index >= explorer.Path.Count)
                 {
                     explorer.Plan(at, farFlag);
                     index = 0;
                     if (explorer.Path.Count == 0) break;
+                }
+                else if (!explorer.IsChasing && steps % 3 == 0 && explorer.TrySpotFlag(at, farFlag))
+                {
+                    index = 0;
                 }
                 at = explorer.Path[index++];
                 explorer.MarkVisited(at);

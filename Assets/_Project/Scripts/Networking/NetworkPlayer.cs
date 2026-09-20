@@ -43,7 +43,7 @@ namespace Mirro.Networking
 
         private Renderer _bodyRenderer;
         private Renderer _noseRenderer;
-        private CapsuleCollider _bodyCollider;
+        private Collider _bodyCollider;
         private bool _hiddenBySpectator;
         private float _nextPitchSync;
 
@@ -101,7 +101,13 @@ namespace Mirro.Networking
 
             ApplySpawnPose();
 
-            if (IsOwner) SetupLocal();
+            if (_isBot)
+            {
+                // 봇은 서버가 소유한다. 서버에서는 CharacterController로 걷고, 다른 피어에서는 원격 캐릭터처럼 보인다.
+                if (IsServer) SetupBot();
+                else SetupRemote();
+            }
+            else if (IsOwner) SetupLocal();
             else SetupRemote();
         }
 
@@ -213,11 +219,28 @@ namespace Mirro.Networking
         {
             // 원격 캐릭터는 CharacterController 대신 일반 콜라이더로 충돌/피격 대상이 된다.
             GetComponent<CharacterController>().enabled = false;
-            _bodyCollider = gameObject.AddComponent<CapsuleCollider>();
-            _bodyCollider.height = 1.8f;
-            _bodyCollider.radius = 0.35f;
-            _bodyCollider.center = new Vector3(0f, 0.9f, 0f);
+            var capsule = gameObject.AddComponent<CapsuleCollider>();
+            capsule.height = 1.8f;
+            capsule.radius = 0.35f;
+            capsule.center = new Vector3(0f, 0.9f, 0f);
+            _bodyCollider = capsule;
 
+            BuildBodyVisuals();
+            ApplyColor();
+            RefreshBodyVisibility();
+        }
+
+        /// <summary>서버가 조종하는 봇: 자기 CharacterController로 걷고(그 자체가 충돌체), 몸체만 눈에 보이게 만든다.</summary>
+        private void SetupBot()
+        {
+            _bodyCollider = GetComponent<CharacterController>();
+            BuildBodyVisuals();
+            ApplyColor();
+            RefreshBodyVisibility();
+        }
+
+        private void BuildBodyVisuals()
+        {
             var body = GameObject.CreatePrimitive(PrimitiveType.Capsule);
             body.name = "Body";
             Destroy(body.GetComponent<Collider>());
@@ -233,9 +256,6 @@ namespace Mirro.Networking
             nose.transform.localPosition = new Vector3(0f, 1.55f, 0.3f);
             nose.transform.localScale = Vector3.one * 0.26f;
             _noseRenderer = nose.GetComponent<Renderer>();
-
-            ApplyColor();
-            RefreshBodyVisibility();
         }
 
         private void OnColorChanged(int previous, int current) => ApplyColor();

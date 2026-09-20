@@ -15,6 +15,7 @@ namespace Mirro.Gameplay
         private readonly DeterministicRandom _rng;
         private readonly bool[] _visited;
         private readonly List<int> _path = new List<int>();
+        private readonly List<int> _spotPath = new List<int>();
 
         public BotPlanner(MazeData maze, BotSettings settings, int seed)
         {
@@ -59,6 +60,22 @@ namespace Mirro.Gameplay
                 // 미로를 다 돌았는데도 아무도 못 찾았다면 마지막으로 아는 깃발을 쫓는다.
                 if (_path.Count == 0 && enemyFlags.Count > 0) TryChase(cell, enemyFlags, int.MaxValue);
             }
+        }
+
+        /// <summary>
+        /// 탐색 중인 봇이 주기적으로 주변을 살핀다: 경로 12칸 안에 남의 깃발이 있으면 그쪽 추격으로 바꾸고 true.
+        /// 없으면 지금 가던 탐색 경로를 그대로 둔다(매번 다시 고르면 같은 거리의 두 칸 사이에서 갈팡질팡한다).
+        /// </summary>
+        public bool TrySpotFlag(int cell, IReadOnlyDictionary<int, ulong> enemyFlags)
+        {
+            if (IsChasing || enemyFlags.Count == 0) return false;
+            if (!_finder.TryFindPath(cell, enemyFlags.ContainsKey, BotSettings.AwarenessDepth, null, _spotPath)) return false;
+
+            int goal = _spotPath.Count > 0 ? _spotPath[_spotPath.Count - 1] : cell;
+            _path.Clear();
+            _path.AddRange(_spotPath);
+            TargetFlagId = enemyFlags[goal];
+            return true;
         }
 
         private bool TryChase(int cell, IReadOnlyDictionary<int, ulong> enemyFlags, int depth)

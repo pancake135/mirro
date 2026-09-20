@@ -15,6 +15,9 @@ namespace Mirro.Gameplay
     {
         public static readonly List<Flag> All = new List<Flag>();
 
+        /// <summary>주인 없는 깃발(깃발 찾기 모드)의 색.</summary>
+        public static readonly Color TreasureColor = new Color(1f, 0.82f, 0.2f);
+
         private const float PoleHeight = 2f;
         private const float ClothWidth = 0.65f;
 
@@ -27,6 +30,9 @@ namespace Mirro.Gameplay
         public ulong PlayerId => _playerId;
 
         public int ColorIndex => _colorIndex;
+
+        /// <summary>안내 문구에 쓰는 깃발 이름(플레이어 색 이름, 금색 깃발은 "금색").</summary>
+        public string DisplayName => MatchManager.IsTreasureId(_playerId) ? "금색" : PlayerColors.GetName(_colorIndex);
 
         public static Flag FindFor(ulong playerId)
         {
@@ -70,7 +76,7 @@ namespace Mirro.Gameplay
 
         private void BuildVisual()
         {
-            Color color = PlayerColors.Get(_colorIndex);
+            Color color = MatchManager.IsTreasureId(_playerId) ? TreasureColor : PlayerColors.Get(_colorIndex);
             var colored = MazeBuilder.CreateColoredMaterial(color);
             var pole = MazeBuilder.CreateColoredMaterial(new Color(0.85f, 0.85f, 0.82f));
             var baseMaterial = MazeBuilder.CreateColoredMaterial(Color.Lerp(color, Color.black, 0.25f));

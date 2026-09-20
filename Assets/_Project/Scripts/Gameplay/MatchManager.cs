@@ -17,6 +17,14 @@ namespace Mirro.Gameplay
         public float flagYaw;
     }
 
+    /// <summary>깃발 찾기 모드에서 미로에 세우는 주인 없는 깃발 하나.</summary>
+    public struct TreasureFlag
+    {
+        public ulong id;
+        public Vector3 position;
+        public float yaw;
+    }
+
     /// <summary>
     /// 한 판의 진행 상태와 규칙. 깃발 뽑기를 서버가 검증해 탈락을 결정하고, 한 명만 남으면 게임을 끝낸다.
     /// 탈락 기록/승자/시간은 모든 피어에 복제되어 HUD와 결과 화면이 그대로 읽는다.
@@ -50,7 +58,10 @@ namespace Mirro.Gameplay
         /// <summary>탈락한 순서대로 쌓이는 기록. 마지막 생존자(승자)는 여기에 들어가지 않는다.</summary>
         public NetworkList<MatchEntry> Eliminated;
 
+        public readonly NetworkVariable<int> Mode = new NetworkVariable<int>((int)GameMode.Versus);
         public readonly NetworkVariable<int> TotalPlayers = new NetworkVariable<int>();
+        public readonly NetworkVariable<int> TotalTreasures = new NetworkVariable<int>();
+        public readonly NetworkVariable<int> Collected = new NetworkVariable<int>();
         public readonly NetworkVariable<bool> Finished = new NetworkVariable<bool>();
         public readonly NetworkVariable<ulong> WinnerId = new NetworkVariable<ulong>(NoOne);
         public readonly NetworkVariable<int> WinnerColor = new NetworkVariable<int>();
@@ -61,6 +72,9 @@ namespace Mirro.Gameplay
 
         private readonly HashSet<ulong> _alive = new HashSet<ulong>();
         private readonly Dictionary<ulong, int> _colors = new Dictionary<ulong, int>();
+        private ulong _humanId = NoOne;
+
+        public GameMode CurrentMode => (GameMode)Mode.Value;
 
         public int AliveCount => Mathf.Max(0, TotalPlayers.Value - Eliminated.Count);
 
@@ -130,32 +144,47 @@ namespace Mirro.Gameplay
 
         // ---- 서버 전용 ----
 
-        /// <summary>플레이어들의 깃발을 세우고 경기를 시작한다. 플레이어가 모두 스폰된 뒤 한 번 호출한다.</summary>
-        public void ServerBegin(IReadOnlyList<MatchPlayer> players)
+        /// <summary>
+        /// 경기를 시작한다. 플레이어(봇 포함)가 모두 스폰된 뒤 한 번 호출한다. Versus/Bots에서는 플레이어마다 깃발을,
+        /// Treasure에서는 주인 없는 금색 깃발을 세운다. Practice에는 깃발이 없다.
+        /// </summary>
+        public void ServerBegin(GameMode mode, IReadOnlyList<MatchPlayer> players, IReadOnlyList<TreasureFlag> treasures)
         {
             if (!IsServer) return;
 
+            Mode.Value = (int)mode;
             var flagPrefab = Resources.Load<GameObject>("Prefabs/Flag");
             foreach (var player in players)
             {
                 _alive.Add(player.clientId);
                 _colors[player.clientId] = player.colorIndex;
+                if (_humanId == NoOne && !IsBotId(player.clientId)) _humanId = player.clientId;
 
-                var go = Instantiate(flagPrefab, player.flagPosition, Quaternion.Euler(0f, player.flagYaw, 0f));
-                go.GetComponent<Flag>().InitServer(player.clientId, player.colorIndex);
-                go.GetComponent<NetworkObject>().Spawn(true);
+                if (mode != GameMode.Versus && mode != GameMode.Bots) continue;
+                SpawnFlag(flagPrefab, player.clientId, player.colorIndex, player.flagPosition, player.flagYaw);
             }
+            foreach (var treasure in treasures)
+                SpawnFlag(flagPrefab, treasure.id, 0, treasure.position, treasure.yaw);
 
             TotalPlayers.Value = players.Count;
+            TotalTreasures.Value = treasures.Count;
             StartTime.Value = NetworkManager.ServerTime.Time;
             NetworkManager.OnClientDisconnectCallback += OnClientDisconnected;
-            Debug.Log($"[Mirro] Match begins with {players.Count} player(s) and {Flag.All.Count} flag(s)");
+            Debug.Log($"[Mirro] Match begins ({mode}) with {players.Count} player(s) and {Flag.All.Count} flag(s)");
         }
 
-        /// <summary>깃발 뽑기 요청을 검증하고 통과하면 주인을 탈락시킨다. 탈락시켰으면 true.</summary>
+        private static void SpawnFlag(GameObject prefab, ulong id, int colorIndex, Vector3 position, float yaw)
+        {
+            var go = Instantiate(prefab, position, Quaternion.Euler(0f, yaw, 0f));
+            go.GetComponent<Flag>().InitServer(id, colorIndex);
+            go.GetComponent<NetworkObject>().Spawn(true);
+        }
+
+        /// <summary>깃발 뽑기 요청을 검증하고 통과하면 주인을 탈락시킨다(금색 깃발이면 수집). 처리했으면 true.</summary>
         public bool ServerTryPullFlag(ulong puller, ulong target)
         {
             if (!IsServer || Finished.Value) return false;
+            if (IsTreasureId(target)) return TryCollectTreasure(puller, target);
             if (puller == target || !_alive.Contains(puller) || !_alive.Contains(target)) return false;
 
             var pullerPlayer = NetworkPlayer.Find(puller);
@@ -169,6 +198,21 @@ namespace Mirro.Gameplay
             }
 
             Eliminate(target, puller);
+            return true;
+        }
+
+        private bool TryCollectTreasure(ulong puller, ulong flagId)
+        {
+            if (CurrentMode != GameMode.Treasure || !_alive.Contains(puller)) return false;
+
+            var pullerPlayer = NetworkPlayer.Find(puller);
+            var flag = Flag.FindFor(flagId);
+            if (pullerPlayer == null || flag == null || !CanReach(pullerPlayer.transform.position, flag, ServerRangeSlack)) return false;
+
+            flag.NetworkObject.Despawn(true);
+            Collected.Value++;
+            Debug.Log($"[Mirro] Treasure collected: {Collected.Value}/{TotalTreasures.Value}");
+            if (Collected.Value >= TotalTreasures.Value) Finish(puller);
             return true;
         }
 
@@ -199,13 +243,34 @@ namespace Mirro.Gameplay
 
         private void CheckForWinner()
         {
-            if (Finished.Value || TotalPlayers.Value < 2 || _alive.Count > 1) return;
+            if (Finished.Value) return;
+
+            switch (CurrentMode)
+            {
+                case GameMode.Practice:
+                case GameMode.Treasure:
+                    return;
+                case GameMode.Bots:
+                    // 사람이 탈락하면 남은 봇끼리 계속 싸우지 않고 바로 끝낸다(패배).
+                    if (_humanId != NoOne && !_alive.Contains(_humanId))
+                    {
+                        Finish(NoOne);
+                        return;
+                    }
+                    break;
+            }
+
+            if (TotalPlayers.Value < 2 || _alive.Count > 1) return;
 
             ulong winner = NoOne;
             foreach (ulong id in _alive) winner = id;
+            Finish(winner);
+        }
 
+        private void Finish(ulong winner)
+        {
             WinnerId.Value = winner;
-            WinnerColor.Value = winner != NoOne ? _colors[winner] : 0;
+            WinnerColor.Value = winner != NoOne && _colors.TryGetValue(winner, out int color) ? color : 0;
             EndTime.Value = NetworkManager.ServerTime.Time;
             Finished.Value = true;
             Debug.Log($"[Mirro] Match finished; winner = {(winner == NoOne ? "nobody" : "player " + winner)}");
