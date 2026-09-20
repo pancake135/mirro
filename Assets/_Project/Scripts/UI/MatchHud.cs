@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using Unity.Netcode;
 using UnityEngine;
 using UnityEngine.UI;
+using Mirro.Core;
 using Mirro.Gameplay;
 using Mirro.Networking;
 using Mirro.Themes;
@@ -36,6 +37,7 @@ namespace Mirro.UI
 
         private RectTransform _canvasRt;
         private Text _alive;
+        private RectTransform _aliveRect;
         private RectTransform _prompt;
         private Text _promptText;
         private RectTransform _barFill;
@@ -71,9 +73,29 @@ namespace Mirro.UI
 
         // ---- 갱신 ----
 
+        private static string FormatTime(double seconds)
+        {
+            var span = System.TimeSpan.FromSeconds(seconds);
+            return $"{(int)span.TotalMinutes:00}:{span.Seconds:00}";
+        }
+
+        /// <summary>상단 알약: 대결은 남은 인원, 깃발 찾기는 모은 깃발과 시간, 자유 연습은 경과 시간.</summary>
         private void UpdateAlive()
         {
-            _alive.text = $"생존 {_match.AliveCount} / {_match.TotalPlayers.Value}";
+            bool versus = _match.CurrentMode == GameMode.Versus || _match.CurrentMode == GameMode.Bots;
+            switch (_match.CurrentMode)
+            {
+                case GameMode.Treasure:
+                    _alive.text = $"깃발 {_match.Collected.Value} / {_match.TotalTreasures.Value} · {FormatTime(_match.Elapsed)}";
+                    break;
+                case GameMode.Practice:
+                    _alive.text = $"자유 연습 · {FormatTime(_match.Elapsed)}";
+                    break;
+                default:
+                    _alive.text = $"생존 {_match.AliveCount} / {_match.TotalPlayers.Value}";
+                    break;
+            }
+            _aliveRect.sizeDelta = new Vector2(versus ? 340f : 560f, 72f);
         }
 
         private void UpdateToasts()
@@ -98,7 +120,7 @@ namespace Mirro.UI
             _prompt.gameObject.SetActive(candidate != null);
             if (candidate == null) return;
 
-            _promptText.text = $"E 키를 길게 눌러 {PlayerColors.GetName(candidate.ColorIndex)} 깃발 뽑기";
+            _promptText.text = $"E 키를 길게 눌러 {candidate.DisplayName} 깃발 뽑기";
             float progress = _puller.Progress;
             _barFill.gameObject.SetActive(progress > 0.02f);
             _barFill.anchorMax = new Vector2(Mathf.Clamp01(progress), 1f);
@@ -130,7 +152,22 @@ namespace Mirro.UI
 
             if (_finishedSeenAt < 0f) _finishedSeenAt = Time.unscaledTime;
             // 마지막 탈락 기록까지 복제된 뒤에 순위를 만든다(변수와 목록이 서로 다른 메시지로 올 수 있다).
-            bool complete = _match.Eliminated.Count >= _match.TotalPlayers.Value - 1;
+            int expectedEliminations;
+            switch (_match.CurrentMode)
+            {
+                case GameMode.Treasure:
+                case GameMode.Practice:
+                    expectedEliminations = 0;
+                    break;
+                case GameMode.Bots:
+                    // 내가 이기면 봇 전원이, 내가 지면(우승자 없음) 내가 탈락 기록에 있어야 한다.
+                    expectedEliminations = _match.WinnerId.Value != MatchManager.NoOne ? _match.TotalPlayers.Value - 1 : 1;
+                    break;
+                default:
+                    expectedEliminations = _match.TotalPlayers.Value - 1;
+                    break;
+            }
+            bool complete = _match.Eliminated.Count >= expectedEliminations;
             if (!complete || Time.unscaledTime - _finishedSeenAt < ResultDelaySeconds) return;
 
             _resultShown = true;
@@ -194,10 +231,10 @@ namespace Mirro.UI
 
             Color accent = _theme != null ? _theme.accentColor : new Color(0.62f, 0.79f, 0.93f);
 
-            var aliveRt = UIFactory.NewRect("AliveLabel", _canvasRt);
-            UIFactory.SetBox(aliveRt, new Vector2(0f, 480f), new Vector2(340f, 72f));
-            UIFactory.AddRounded(aliveRt, new Color(0f, 0f, 0f, 0.5f), 34f);
-            _alive = UIFactory.AddLabel(aliveRt, "Text", "생존", 40, Color.white, FontStyle.Bold);
+            _aliveRect = UIFactory.NewRect("AliveLabel", _canvasRt);
+            UIFactory.SetBox(_aliveRect, new Vector2(0f, 480f), new Vector2(340f, 72f));
+            UIFactory.AddRounded(_aliveRect, new Color(0f, 0f, 0f, 0.5f), 34f);
+            _alive = UIFactory.AddLabel(_aliveRect, "Text", "생존", 40, Color.white, FontStyle.Bold);
 
             _prompt = UIFactory.NewRect("PullPrompt", _canvasRt);
             UIFactory.SetBox(_prompt, new Vector2(0f, -300f), new Vector2(900f, 150f));

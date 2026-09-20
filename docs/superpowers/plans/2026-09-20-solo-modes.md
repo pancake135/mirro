@@ -1746,3 +1746,12 @@ echo ALLDONE
 - **8(테스트)**: Task 3/4 셀프 테스트, Task 9 플레이테스트(봇/깃발/연습/솔로 방 거절).
 - **타입 일관성**: `ServerBegin(GameMode, IReadOnlyList<MatchPlayer>, IReadOnlyList<TreasureFlag>)`은 Task 5 정의를 Task 5(부트스트랩)에서만 호출한다. `BotBrain.Init(NetworkPlayer, MazeData, float, BotDifficulty, int)`은 Task 6의 정의와 호출이 같다. `BotSettings.For`/`BotPlanner.Plan` 시그니처는 Task 3 정의와 Task 6/테스트 사용이 같다.
 - 알려진 위험: Task 9의 봇 이동 검증(경로 거리 5칸 감소)은 속도 배율 2와 12초 관찰에 의존한다. 봇이 예상보다 느리면 관찰 시간이나 배율을 조정한다.
+
+---
+
+## 실행 메모 (구현 후 기록)
+
+- **Task 3:** 탐색형이 0.5초마다 탐색 목표를 다시 고르면 같은 거리의 두 칸 사이에서 갈팡질팡할 수 있어서, 주기 점검용 `BotPlanner.TrySpotFlag(cell, enemyFlags)`를 추가하고 `BotBrain.Replan`은 "깃발이 보이는지"만 살피도록 했다(셀프 테스트의 탐색형 시뮬레이션도 같은 방식으로 수정).
+- **Task 7:** `MatchHud`가 결과 화면을 띄우는 조건("마지막 탈락 기록까지 복제됨")을 모드별로 나눴다(봇 대결에서 내가 지면 탈락 기록이 1개뿐이므로 `TotalPlayers - 1`을 기다리면 화면이 영원히 안 뜬다).
+- **Task 9:** 깃발 찾기/자유 연습 테스트는 22~35초로 짧아서 늦은 접속(`intruder`)을 14초 뒤에 시작하면 방이 이미 닫혀 "Failed to connect" 에러 로그가 남았다. `runsolo.sh`의 늦은 접속 지연을 6초(`INTRUDER_DELAY`)로 줄였다.
+- 검증은 계획대로 매 작업마다 컴파일 + 셀프 테스트/플레이테스트로 했고, 커밋은 Task 1 / 2 / 3+4 / 5+6 / 7+8+9로 나눴다.

@@ -14,7 +14,9 @@ namespace Mirro.UI
     /// </summary>
     public class PauseMenu : MonoBehaviour
     {
-        private const string RestartLabel = "로비로 돌아가기";
+        // 멀티 방장은 "로비로 돌아가기", 혼자 하기는 "다시 시작"(대기실 없이 새 미로로 바로).
+        private string _restartText = "로비로 돌아가기";
+        private bool _solo;
         private const float RestartConfirmSeconds = 3f;
 
         private FirstPersonController _controller;
@@ -65,19 +67,22 @@ namespace Mirro.UI
             if (_restartArmedUntil <= 0f)
             {
                 _restartArmedUntil = Time.unscaledTime + RestartConfirmSeconds;
-                _restartLabel.text = "모두 로비로! 한 번 더";
+                _restartLabel.text = _solo ? "정말요? 한 번 더" : "모두 로비로! 한 번 더";
                 return;
             }
 
             DisarmRestart();
             var session = NetworkSession.Instance;
-            if (session != null) session.ReturnToLobby();
+            if (session == null) return;
+
+            if (_solo) session.RestartSolo();
+            else session.ReturnToLobby();
         }
 
         private void DisarmRestart()
         {
             _restartArmedUntil = 0f;
-            if (_restartLabel != null) _restartLabel.text = RestartLabel;
+            if (_restartLabel != null) _restartLabel.text = _restartText;
         }
 
         private void Build()
@@ -102,8 +107,10 @@ namespace Mirro.UI
             UIFactory.Stretch(dim);
             UIFactory.AddSolid(dim, new Color(0f, 0f, 0f, 0.6f)).raycastTarget = true;
 
-            // 방장에게만 [로비로 돌아가기](다시 시작)가 하나 더 보인다.
-            bool isHost = NetworkManager.Singleton != null && NetworkManager.Singleton.IsServer;
+            // 멀티 방장에게는 [로비로 돌아가기], 혼자 하기에서는 [다시 시작]이 하나 더 보인다.
+            _solo = NetworkSession.Instance != null && NetworkSession.Instance.IsSolo.Value;
+            bool isHost = _solo || (NetworkManager.Singleton != null && NetworkManager.Singleton.IsServer);
+            _restartText = _solo ? "다시 시작" : "로비로 돌아가기";
             float step = 130f;
             float top = isHost ? 205f : 140f;
 
@@ -123,7 +130,7 @@ namespace Mirro.UI
 
             if (isHost)
             {
-                _restartLabel = BuildButton(panel, "RestartButton", RestartLabel, new Vector2(0f, y), new Color(0.50f, 0.34f, 0.16f),
+                _restartLabel = BuildButton(panel, "RestartButton", _restartText, new Vector2(0f, y), new Color(0.50f, 0.34f, 0.16f),
                     Color.white, OnRestartClicked);
                 _restartLabel.fontSize = 38;
                 y -= step;

@@ -66,7 +66,7 @@ namespace Mirro.Testing
             d._season = ReadArg(args, "-mirroSeason") ?? "Spring";
             if (int.TryParse(ReadArg(args, "-mirroSize"), out int size)) d._size = size;
             if (int.TryParse(ReadArg(args, "-mirroPlayers"), out int players)) d._players = Mathf.Clamp(players, 1, 4);
-            if (d._role == "solo") d._players = 1;
+            if (d._role.StartsWith("solo")) d._players = 1;
         }
 
         private static string ReadArg(string[] args, string name)
@@ -264,6 +264,20 @@ namespace Mirro.Testing
             if (_role == "intruder")
             {
                 yield return IntruderFlow();
+                Finish();
+                yield break;
+            }
+
+            if (_role == "solobots" || _role == "solohunt" || _role == "solopractice")
+            {
+                yield return SoloModeMenuFlow();
+                if (_abort) { Finish(); yield break; }
+                yield return WaitFor(() => NetworkPlayer.Local != null, 60f, "solo game scene loaded and local player spawned");
+                if (_abort) { Finish(); yield break; }
+
+                if (_role == "solobots") yield return SoloBotsChecks();
+                else if (_role == "solohunt") yield return SoloHuntChecks();
+                else yield return SoloPracticeChecks();
                 Finish();
                 yield break;
             }
@@ -611,6 +625,257 @@ namespace Mirro.Testing
             yield return TapKey(Key.Escape);
             Check(pause.IsOpen, "Esc reopens the pause menu");
             yield return LeaveViaPauseMenu(pause);
+            yield return VerifyBackAtMenu(false);
+        }
+
+        // ---- 혼자 하기: 봇과 대결 / 깃발 찾기 / 자유 연습 ----
+
+        /// <summary>실제 클릭으로 타이틀 → 혼자 하기 → 모드 카드 → 테마 → 크기 → (봇 설정) → 시작까지 진행한다(대기실 없이 시작).</summary>
+        private IEnumerator SoloModeMenuFlow()
+        {
+            string mode = _role == "solobots" ? "Bots" : _role == "solohunt" ? "Treasure" : "Practice";
+
+            yield return ClickUi(MenuNode("TitleScreen/SoloButton"), "solo button", () => MenuScreenActive("SoloModeScreen"));
+            Check(MenuScreenActive("SoloModeScreen"), "solo mode screen shown");
+            Check(MenuNode("SoloModeScreen/Mode_Bots") != null && MenuNode("SoloModeScreen/Mode_Treasure") != null && MenuNode("SoloModeScreen/Mode_Practice") != null,
+                "three mode cards are offered");
+            yield return Shot("02_solo_modes");
+
+            yield return ClickUi(MenuNode("SoloModeScreen/Mode_" + mode), "mode card " + mode, () => MenuScreenActive("ThemeScreen"));
+            yield return ClickUi(MenuNode("ThemeScreen/Card_" + _season), "theme card " + _season, () => MenuScreenActive("SizeScreen"));
+            Check(MenuNode("SizeScreen/StartButton/Label").GetComponent<Text>().text == "시작", "size screen's confirm button says start in the solo flow");
+
+            var ring = MenuNode($"SizeScreen/Size_{_size}/Ring");
+            yield return ClickUi(MenuNode($"SizeScreen/Size_{_size}/Base"), "size button " + _size, () => ring.gameObject.activeSelf);
+
+            if (_role == "solobots")
+            {
+                yield return ClickUi(MenuNode("SizeScreen/StartButton"), "size confirm button", () => MenuScreenActive("BotOptionsScreen"));
+                Check(MenuScreenActive("BotOptionsScreen"), "bot options screen shown for the bot mode");
+                yield return ClickUi(MenuNode("BotOptionsScreen/BotCount_3"), "bot count 3", () => true);
+                yield return ClickUi(MenuNode("BotOptionsScreen/Diff_Hard"), "hard difficulty", () => true);
+                yield return Shot("03_bot_options");
+                yield return ClickUi(MenuNode("BotOptionsScreen/BotStartButton"), "bot start button", () => SceneManager.GetActiveScene().name == GameSession.GameScene);
+            }
+            else
+            {
+                yield return ClickUi(MenuNode("SizeScreen/StartButton"), "size confirm button", () => SceneManager.GetActiveScene().name == GameSession.GameScene);
+            }
+
+            yield return WaitFor(() => SceneManager.GetActiveScene().name == GameSession.GameScene, 30f, "the solo game starts without a lobby");
+            Check(NetworkSession.Instance != null && NetworkSession.Instance.IsSolo.Value, "the room is a local-only solo room");
+        }
+
+        private IEnumerator SoloBotsChecks()
+        {
+            // 출발 지연을 짧게, 속도를 2배로 해서 봇의 움직임을 짧은 시간에 확인한다.
+            BotBrain.StartDelayOverride = 4f;
+            BotBrain.SpeedMultiplier = 2f;
+            var local = NetworkPlayer.Local;
+            var maze = MazeGameBootstrap.Instance.Maze;
+            float cell = MazeGameBootstrap.Instance.CellSize;
+
+            yield return WaitFor(() => MatchManager.Instance != null && NetworkPlayer.All.Count == 4 && Flag.All.Count == 4, 30f, "the player, 3 bots and 4 flags exist");
+            if (_abort) yield break;
+            var match = MatchManager.Instance;
+
+            var bots = new List<NetworkPlayer>();
+            foreach (var p in NetworkPlayer.All) if (p.IsBot) bots.Add(p);
+            var colors = new HashSet<int> { local.ColorIndex.Value };
+            foreach (var b in bots) colors.Add(b.ColorIndex.Value);
+            Check(bots.Count == 3 && colors.Count == 4, "three bots with distinct colors, none sharing the player's");
+            Check(match.CurrentMode == GameMode.Bots && HudNode("AliveLabel/Text").GetComponent<Text>().text == "생존 4 / 4", "HUD shows 4 alive in bot mode");
+            foreach (var b in bots)
+                Check(BodyOf(b) != null && BodyOf(b).enabled && MatchManager.IsBotId(b.PlayerId), $"bot {b.PlayerId} has a visible body");
+            Check(local.IsLocalHuman && !local.IsBot, "the local player is the only human");
+            yield return Shot("06_bots_spawn");
+
+            // 출발 지연 전에는 서 있다.
+            var start = new Dictionary<ulong, Vector3>();
+            foreach (var b in bots) start[b.PlayerId] = b.transform.position;
+            yield return WaitMatchTime(2.5f);
+            foreach (var b in bots)
+                Check(Vector3.Distance(start[b.PlayerId], b.transform.position) < 0.3f, $"bot {b.PlayerId} waits during its start delay");
+
+            // 지연 뒤에는 가장 가까운 남의 깃발을 향해 걷는다(경로 거리가 줄어든다). 걷는 동안 벽에 겹치지 않는다.
+            var fields = new Dictionary<ulong, int[]>();
+            foreach (var flag in Flag.All)
+                fields[flag.PlayerId] = SpawnPlacer.PathDistances(maze, SpawnPlacer.CellAt(flag.transform.position, cell));
+            Func<NetworkPlayer, int> distanceToNearestEnemyFlag = bot =>
+            {
+                var c = SpawnPlacer.CellAt(bot.transform.position, cell);
+                int index = maze.Index(Mathf.Clamp(c.x, 0, maze.Width - 1), Mathf.Clamp(c.y, 0, maze.Height - 1));
+                int best = int.MaxValue;
+                foreach (var pair in fields)
+                    if (pair.Key != bot.PlayerId) best = Mathf.Min(best, pair.Value[index]);
+                return best;
+            };
+            var before = new Dictionary<ulong, int>();
+            foreach (var b in bots) before[b.PlayerId] = distanceToNearestEnemyFlag(b);
+
+            int wallHits = 0, samples = 0;
+            for (float t = 0f; t < 12f; t += Time.unscaledDeltaTime)
+            {
+                foreach (var b in bots) { if (OverlapsWall(b.transform.position)) wallHits++; samples++; }
+                yield return null;
+            }
+            foreach (var b in bots)
+            {
+                int now = distanceToNearestEnemyFlag(b);
+                Check(now <= before[b.PlayerId] - 5, $"bot {b.PlayerId} walked toward the nearest flag ({before[b.PlayerId]} -> {now} cells)");
+            }
+            Check(wallHits == 0, $"bots never overlap walls while walking ({wallHits}/{samples} samples)");
+            yield return Shot("07_bots_walking");
+
+            // 봇 하나를 내 깃발 칸으로 옮기면 사람과 같은 방식으로 서서 뽑고, 사람이 탈락해 패배 결과 화면이 뜬다.
+            var attacker = bots[0];
+            var myFlag = Flag.FindFor(local.PlayerId);
+            attacker.TeleportTo(SpawnPlacer.CellCenter(SpawnPlacer.CellAt(myFlag.transform.position, cell), cell), Quaternion.identity);
+            yield return WaitFor(() => match.Finished.Value, 25f, "a bot standing at the player's flag pulls it and ends the game");
+            if (_abort) yield break;
+            Check(!local.IsAlive.Value && match.WinnerId.Value == MatchManager.NoOne, "the player is eliminated and nobody wins");
+            yield return WaitFor(() => ResultScreen.IsShowing, 10f, "the result screen shows after the defeat");
+            if (_abort) yield break;
+            var panel = GameObject.Find("ResultScreen").transform.Find("ResultCanvas/Panel");
+            Check(panel.Find("Title").GetComponent<Text>().text == "패배", "result title says defeat");
+            int botRows = 0;
+            for (int r = 0; r < 4; r++)
+            {
+                var row = panel.Find("Row" + r);
+                if (row.gameObject.activeSelf && row.Find("Name").GetComponent<Text>().text.EndsWith("(봇)")) botRows++;
+            }
+            Check(botRows == 3, $"result rows mark the three bots ({botRows})");
+            Check(panel.Find("RestartButton") != null && panel.Find("MenuButton") != null, "the solo result screen offers restart and main menu");
+            yield return Shot("08_bots_defeat");
+
+            // 다시 하기 → 새 미로에서 처음부터. 이번엔 봇을 멈춰 두고 내가 봇 깃발을 모두 뽑아 이긴다.
+            int firstSeed = GameSession.Seed;
+            BotBrain.StartDelayOverride = 9999f;
+            yield return ClickUi(panel.Find("RestartButton"), "solo restart button", () => !ResultScreen.IsShowing);
+            yield return WaitFor(() => NetworkPlayer.Local != null && NetworkPlayer.Local != local && MatchManager.Instance != null && MatchManager.Instance != match
+                                       && Flag.All.Count == 4 && NetworkPlayer.All.Count == 4, 40f, "restart reloads the game with fresh players, bots and flags");
+            if (_abort) yield break;
+            Check(GameSession.Seed != firstSeed && !ResultScreen.IsShowing, "restart uses a new maze and clears the result screen");
+            local = NetworkPlayer.Local;
+            match = MatchManager.Instance;
+            Check(match.Eliminated.Count == 0 && !match.Finished.Value && local.IsAlive.Value, "restart begins with a fresh match");
+
+            var targets = new List<NetworkPlayer>();
+            foreach (var p in NetworkPlayer.All) if (p.IsBot) targets.Add(p);
+            foreach (var b in targets)
+            {
+                ulong botId = b.PlayerId;
+                yield return PullFlagWithKeyboard(botId, PlayerColors.GetName(b.ColorIndex.Value));
+                if (_abort) yield break;
+                yield return WaitFor(() => match.IsEliminated(botId), 15f, $"bot {botId} is eliminated");
+            }
+            yield return WaitFor(() => match.Finished.Value && ResultScreen.IsShowing, 15f, "eliminating every bot finishes the game");
+            if (_abort) yield break;
+            Check(match.WinnerId.Value == local.PlayerId, "the player wins");
+            panel = GameObject.Find("ResultScreen").transform.Find("ResultCanvas/Panel");
+            Check(panel.Find("Title").GetComponent<Text>().text == "승리!", "result title says victory");
+            yield return Shot("09_bots_victory");
+
+            yield return ClickUi(panel.Find("MenuButton"), "result-screen main-menu button", () => SceneManager.GetActiveScene().name == GameSession.MenuScene);
+            yield return VerifyBackAtMenu(false);
+            BotBrain.StartDelayOverride = -1f;
+            BotBrain.SpeedMultiplier = 1f;
+        }
+
+        private IEnumerator SoloHuntChecks()
+        {
+            PlayerPrefs.DeleteKey("mirro.treasure.best." + _size);
+            var local = NetworkPlayer.Local;
+            int total = Mathf.Max(1, _size / 10);
+
+            yield return WaitFor(() => MatchManager.Instance != null && Flag.All.Count == total, 30f, $"{total} treasure flags exist");
+            if (_abort) yield break;
+            var match = MatchManager.Instance;
+            Check(match.CurrentMode == GameMode.Treasure && match.TotalTreasures.Value == total && NetworkPlayer.All.Count == 1, "treasure mode: one player and no bots");
+
+            bool allGold = true, allTreasureIds = true;
+            foreach (var flag in Flag.All)
+            {
+                allTreasureIds &= MatchManager.IsTreasureId(flag.PlayerId);
+                Color c = flag.transform.Find("ClothPivot/Cloth").GetComponent<Renderer>().sharedMaterial.color;
+                allGold &= Mathf.Abs(c.r - Flag.TreasureColor.r) < 0.05f && Mathf.Abs(c.g - Flag.TreasureColor.g) < 0.05f;
+            }
+            Check(allGold && allTreasureIds, "every flag is gold and ownerless");
+            Check(Flag.FindFor(local.PlayerId) == null, "the player has no flag of their own in this mode");
+            var counter = HudNode("AliveLabel/Text").GetComponent<Text>();
+            Check(counter.text.StartsWith($"깃발 0 / {total}"), $"HUD counts collected flags (\"{counter.text}\")");
+            yield return Shot("06_hunt_start");
+
+            int collected = 0;
+            while (Flag.All.Count > 0)
+            {
+                ulong id = Flag.All[0].PlayerId;
+                yield return PullFlagWithKeyboard(id, "금색");
+                if (_abort) yield break;
+                collected++;
+                int target = collected;
+                yield return WaitFor(() => match.Collected.Value >= target && counter.text.StartsWith($"깃발 {target} / {total}"), 15f, $"flag {target}/{total} is collected and the HUD updates");
+                if (_abort) yield break;
+            }
+            yield return WaitFor(() => match.Finished.Value && ResultScreen.IsShowing, 15f, "collecting every flag finishes the run");
+            if (_abort) yield break;
+            Check(match.WinnerId.Value == local.PlayerId, "the run is completed by the player");
+            var panel = GameObject.Find("ResultScreen").transform.Find("ResultCanvas/Panel");
+            Check(panel.Find("Title").GetComponent<Text>().text == "완료!", "result title says completed");
+            string record = panel.Find("Row0/Note").GetComponent<Text>().text;
+            string best = panel.Find("Row1/Note").GetComponent<Text>().text;
+            Check(record.Contains(":") && best.Contains("새 기록"), $"the first run is a new record (record {record}, best \"{best}\")");
+            Check(TreasureRecords.Best(_size) > 0f && Mathf.Abs(TreasureRecords.Best(_size) - (float)match.Elapsed) < 2f, "the best time is saved on this PC");
+            yield return Shot("07_hunt_result");
+
+            // 다시 하기 → 새 미로, 카운터 초기화.
+            int firstSeed = GameSession.Seed;
+            yield return ClickUi(panel.Find("RestartButton"), "solo restart button", () => !ResultScreen.IsShowing);
+            yield return WaitFor(() => MatchManager.Instance != null && MatchManager.Instance != match && Flag.All.Count == total, 40f, "restart sets up a fresh treasure hunt");
+            if (_abort) yield break;
+            Check(GameSession.Seed != firstSeed && MatchManager.Instance.Collected.Value == 0 && !MatchManager.Instance.Finished.Value,
+                "restart resets the counter on a new maze");
+            yield return Shot("08_hunt_restarted");
+
+            yield return LeaveViaPauseMenu(FindAnyObjectByType<PauseMenu>());
+            yield return VerifyBackAtMenu(false);
+            PlayerPrefs.DeleteKey("mirro.treasure.best." + _size);
+        }
+
+        private IEnumerator SoloPracticeChecks()
+        {
+            yield return WaitFor(() => MatchManager.Instance != null, 30f, "the match manager exists");
+            if (_abort) yield break;
+            var match = MatchManager.Instance;
+            var local = NetworkPlayer.Local;
+            Check(match.CurrentMode == GameMode.Practice && Flag.All.Count == 0 && NetworkPlayer.All.Count == 1, "practice: no flags and no other players");
+            var label = HudNode("AliveLabel/Text").GetComponent<Text>();
+            Check(label.text.StartsWith("자유 연습"), $"HUD names the practice mode (\"{label.text}\")");
+
+            Vector3 p0 = local.transform.position;
+            yield return Hold(1f, Key.W);
+            Check(Vector3.Distance(p0, local.transform.position) > 1.2f, "the player can walk around");
+            yield return new WaitForSeconds(6f);
+            Check(!match.Finished.Value && !ResultScreen.IsShowing, "a practice run never ends by itself");
+            yield return Shot("06_practice");
+
+            var pause = FindAnyObjectByType<PauseMenu>();
+            yield return TapKey(Key.Escape);
+            var restart = pause.transform.Find("PauseCanvas/Panel/RestartButton");
+            var restartLabel = restart != null ? restart.Find("Label").GetComponent<Text>() : null;
+            Check(pause.IsOpen && restartLabel != null && restartLabel.text == "다시 시작", "the pause menu offers restart in solo");
+            if (restartLabel == null) { _abort = true; yield break; }
+
+            int firstSeed = GameSession.Seed;
+            string original = restartLabel.text;
+            yield return ClickUi(restart, "pause-menu restart button", () => restartLabel.text != original);
+            yield return ClickUi(restart, "pause-menu restart button (confirm)", () => GameSession.Seed != firstSeed || NetworkPlayer.Local != local);
+            yield return WaitFor(() => NetworkPlayer.Local != null && NetworkPlayer.Local != local && MatchManager.Instance != null && MatchManager.Instance != match,
+                40f, "restart reloads the practice game");
+            if (_abort) yield break;
+            Check(GameSession.Seed != firstSeed, "restart uses a new maze");
+
+            yield return LeaveViaPauseMenu(FindAnyObjectByType<PauseMenu>());
             yield return VerifyBackAtMenu(false);
         }
 

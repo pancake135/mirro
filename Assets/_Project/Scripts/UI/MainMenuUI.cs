@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 using Mirro.Core;
+using Mirro.Gameplay;
 using Mirro.Networking;
 using Mirro.Themes;
 
@@ -40,7 +41,12 @@ namespace Mirro.UI
         private RectTransform _sizeScreen;
         private JoinScreen _join;
         private LobbyScreen _lobby;
+        private SoloModeScreen _soloScreen;
+        private BotOptionsScreen _botOptions;
         private RectTransform _activeScreen;
+
+        // 혼자 하기 흐름에서 고른 모드(null이면 멀티 방 만들기 흐름).
+        private GameMode? _soloMode;
 
         private Text _titleMessage;
         private Text _sizeSubtitle;
@@ -113,6 +119,8 @@ namespace Mirro.UI
 
             _join = new JoinScreen(this);
             _lobby = new LobbyScreen(this);
+            _soloScreen = new SoloModeScreen(this, PickSoloMode, () => ShowTitleScreen());
+            _botOptions = new BotOptionsScreen(this, StartSolo, () => ShowSizeScreen(_theme));
         }
 
         public RectTransform NewScreen(string name)
@@ -129,7 +137,7 @@ namespace Mirro.UI
 
         private void Activate(RectTransform screen)
         {
-            foreach (var s in new[] { _titleScreen, _themeScreen, _sizeScreen, _join.Root, _lobby.Root })
+            foreach (var s in new[] { _titleScreen, _themeScreen, _sizeScreen, _join.Root, _lobby.Root, _soloScreen.Root, _botOptions.Root })
                 s.gameObject.SetActive(s == screen);
             _activeScreen = screen;
 
@@ -146,6 +154,7 @@ namespace Mirro.UI
         {
             _theme = null;
             _selectedSize = 0;
+            _soloMode = null;
             SetBackground(NeutralBackground);
             _titleMessage.text = message ?? string.Empty;
             Activate(_titleScreen);
@@ -168,9 +177,52 @@ namespace Mirro.UI
             _sizeSubtitle.text = "선택한 테마: " + theme.displayName;
             _sizeSubtitle.color = theme.accentColor;
             _sizeError.text = string.Empty;
+            _createButton.label.text = _soloMode != null ? "시작" : "방 만들기";
 
             RefreshSizeSelection();
             Activate(_sizeScreen);
+        }
+
+        // ---- 혼자 하기 ----
+
+        public void ShowSoloModeScreen()
+        {
+            _soloMode = null;
+            _theme = null;
+            _selectedSize = 0;
+            SetBackground(NeutralBackground);
+            Activate(_soloScreen.Root);
+        }
+
+        private void PickSoloMode(GameMode mode)
+        {
+            _soloMode = mode;
+            ShowThemeScreen();
+        }
+
+        private void ShowBotOptionsScreen()
+        {
+            _botOptions.Show(_theme.accentColor);
+            SetBackgroundTint(_theme.accentColor);
+            Activate(_botOptions.Root);
+        }
+
+        /// <summary>방을 내 PC 안에만 열고 대기실 없이 바로 시작한다.</summary>
+        private void StartSolo()
+        {
+            if (_soloMode == null || _theme == null || _selectedSize == 0) return;
+
+            if (!NetworkFlow.Instance.HostRoom(_theme, _selectedSize, NetworkFlow.DefaultPort, solo: true))
+            {
+                string reason = NetworkFlow.Instance.FailureReason ?? "게임을 시작하지 못했어요.";
+                if (_soloMode == GameMode.Bots) _botOptions.SetError(reason);
+                else _sizeError.text = reason;
+                return;
+            }
+
+            var session = NetworkSession.Instance;
+            session.ConfigureSolo(_soloMode.Value, _botOptions.BotCount, _botOptions.Difficulty);
+            session.StartSoloGame();
         }
 
         public void ShowJoinScreen()
@@ -202,6 +254,13 @@ namespace Mirro.UI
         {
             if (_theme == null || _selectedSize == 0) return;
 
+            if (_soloMode != null)
+            {
+                if (_soloMode == GameMode.Bots) ShowBotOptionsScreen();
+                else StartSolo();
+                return;
+            }
+
             if (!NetworkFlow.Instance.HostRoom(_theme, _selectedSize))
             {
                 _sizeError.text = NetworkFlow.Instance.FailureReason ?? "방을 만들지 못했어요.";
@@ -220,13 +279,15 @@ namespace Mirro.UI
             var subtitle = UIFactory.AddLabel(_titleScreen, "Subtitle", "최대 4명 · 상대의 깃발을 뽑아 탈락시키세요", 40, MutedText);
             UIFactory.SetBox(subtitle.rectTransform, new Vector2(0f, 130f), new Vector2(1500f, 70f));
 
-            UIFactory.AddTextButton(_titleScreen, "CreateRoomButton", "방 만들기", new Vector2(0f, -60f), new Vector2(620f, 130f),
+            UIFactory.AddTextButton(_titleScreen, "CreateRoomButton", "방 만들기", new Vector2(0f, -20f), new Vector2(620f, 130f),
                 DefaultAccent, UIFactory.ContrastText(DefaultAccent), 60, ShowThemeScreen, 56f);
-            UIFactory.AddTextButton(_titleScreen, "JoinRoomButton", "참가하기", new Vector2(0f, -220f), new Vector2(620f, 130f),
+            UIFactory.AddTextButton(_titleScreen, "JoinRoomButton", "참가하기", new Vector2(0f, -170f), new Vector2(620f, 130f),
                 SizeButtonColor, SizeButtonText, 60, ShowJoinScreen, 56f);
+            UIFactory.AddTextButton(_titleScreen, "SoloButton", "혼자 하기", new Vector2(0f, -320f), new Vector2(620f, 130f),
+                SecondaryButton, Color.white, 60, ShowSoloModeScreen, 56f);
 
             _titleMessage = UIFactory.AddLabel(_titleScreen, "Message", string.Empty, 38, WarningText);
-            UIFactory.SetBox(_titleMessage.rectTransform, new Vector2(0f, -370f), new Vector2(1500f, 70f));
+            UIFactory.SetBox(_titleMessage.rectTransform, new Vector2(0f, -450f), new Vector2(1500f, 70f));
         }
 
         // ---- 테마 선택 ----
@@ -246,8 +307,9 @@ namespace Mirro.UI
                 BuildThemeCard(themes[i], new Vector2(x, -60f));
             }
 
+            // 혼자 하기 흐름에서는 모드 선택으로, 멀티 방 만들기 흐름에서는 타이틀로 돌아간다.
             UIFactory.AddTextButton(_themeScreen, "BackButton", "뒤로", new Vector2(-780f, -450f), new Vector2(240f, 90f),
-                SecondaryButton, Color.white, 40, () => ShowTitleScreen(), 36f);
+                SecondaryButton, Color.white, 40, () => { if (_soloMode != null) ShowSoloModeScreen(); else ShowTitleScreen(); }, 36f);
         }
 
         private void BuildThemeCard(MazeThemeConfig theme, Vector2 position)
