@@ -31,6 +31,14 @@ namespace Mirro.Gameplay
 
         public const ulong NoOne = ulong.MaxValue;
 
+        /// <summary>봇의 PlayerId는 BotIdBase + n, 주인 없는 금색 깃발은 TreasureIdBase + n.</summary>
+        public const ulong BotIdBase = 1000;
+        public const ulong TreasureIdBase = 2000;
+
+        public static bool IsBotId(ulong id) => id >= BotIdBase && id < TreasureIdBase;
+
+        public static bool IsTreasureId(ulong id) => id >= TreasureIdBase && id < NoOne;
+
         // 서버가 보는 플레이어 위치는 조금 늦으므로 서버 쪽 거리 판정만 여유를 둔다.
         private const float ServerRangeSlack = 1f;
 

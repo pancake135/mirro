@@ -34,6 +34,8 @@ namespace Mirro.Networking
         // 생성된다. 그래서 스폰 위치/방향을 스폰 페이로드(OnSynchronize)에 실어 보내 모든 피어가 직접 맞춘다.
         private Vector3 _spawnPosition;
         private float _spawnYaw;
+        private bool _isBot;
+        private ulong _botId;
 
         public FirstPersonController controller;
         public Camera playerCamera;
@@ -52,11 +54,27 @@ namespace Mirro.Networking
 
         public float SpawnYaw => _spawnYaw;
 
-        public static NetworkPlayer Find(ulong clientId)
+        /// <summary>서버가 조종하는 봇인지(스폰 페이로드로 전달).</summary>
+        public bool IsBot => _isBot;
+
+        /// <summary>깃발/탈락 기록/관전이 플레이어를 가리키는 번호. 사람은 접속 번호, 봇은 MatchManager.BotIdBase + n.</summary>
+        public ulong PlayerId => _isBot ? _botId : OwnerClientId;
+
+        /// <summary>이 화면을 조작하는 사람의 캐릭터인지. 봇은 서버가 소유하므로 IsOwner만으로는 구별할 수 없다.</summary>
+        public bool IsLocalHuman => IsOwner && !_isBot;
+
+        public static NetworkPlayer Find(ulong playerId)
         {
             foreach (var player in All)
-                if (player.OwnerClientId == clientId) return player;
+                if (player.PlayerId == playerId) return player;
             return null;
+        }
+
+        /// <summary>서버 전용: Spawn 호출 전에 봇으로 지정한다.</summary>
+        public void InitBot(ulong botId)
+        {
+            _isBot = true;
+            _botId = botId;
         }
 
         /// <summary>서버 전용: Spawn 호출 전에 스폰 위치/방향을 정한다(스폰 페이로드에 함께 실린다).</summary>
@@ -70,6 +88,8 @@ namespace Mirro.Networking
         {
             serializer.SerializeValue(ref _spawnPosition);
             serializer.SerializeValue(ref _spawnYaw);
+            serializer.SerializeValue(ref _isBot);
+            serializer.SerializeValue(ref _botId);
             base.OnSynchronize(ref serializer);
         }
 
@@ -88,7 +108,7 @@ namespace Mirro.Networking
         private void Update()
         {
             // 상하 시선은 자주 바뀌므로 조금이라도 달라졌을 때만, 초당 20번 이하로 보낸다.
-            if (!IsSpawned || !IsOwner || Time.unscaledTime < _nextPitchSync) return;
+            if (!IsSpawned || !IsLocalHuman || Time.unscaledTime < _nextPitchSync) return;
 
             float pitch = controller.Pitch;
             if (Mathf.Abs(pitch - LookPitch.Value) < 0.25f) return;
@@ -101,8 +121,8 @@ namespace Mirro.Networking
         [Rpc(SendTo.Server, InvokePermission = RpcInvokePermission.Owner)]
         public void PullFlagRpc(ulong targetPlayerId, RpcParams rpcParams = default)
         {
-            if (rpcParams.Receive.SenderClientId != OwnerClientId) return;
-            MatchManager.Instance?.ServerTryPullFlag(OwnerClientId, targetPlayerId);
+            if (_isBot || rpcParams.Receive.SenderClientId != OwnerClientId) return;
+            MatchManager.Instance?.ServerTryPullFlag(PlayerId, targetPlayerId);
         }
 
         /// <summary>관전 중인 사람이 이 캐릭터의 눈으로 보고 있을 때 몸체가 화면에 걸리지 않도록 숨긴다.</summary>
@@ -115,7 +135,7 @@ namespace Mirro.Networking
         private void OnAliveChanged(bool previous, bool alive)
         {
             RefreshBodyVisibility();
-            if (!alive && IsOwner) EnterSpectator();
+            if (!alive && IsLocalHuman) EnterSpectator();
         }
 
         private void RefreshBodyVisibility()
@@ -138,7 +158,7 @@ namespace Mirro.Networking
             if (match != null)
             {
                 for (int i = 0; i < match.Eliminated.Count; i++)
-                    if (match.Eliminated[i].clientId == OwnerClientId) killer = match.Eliminated[i].eliminatedBy;
+                    if (match.Eliminated[i].clientId == PlayerId) killer = match.Eliminated[i].eliminatedBy;
             }
 
             if (GetComponent<SpectatorView>() == null)

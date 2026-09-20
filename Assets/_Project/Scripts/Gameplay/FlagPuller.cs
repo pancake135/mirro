@@ -67,7 +67,7 @@ namespace Mirro.Gameplay
 
             foreach (var flag in Flag.All)
             {
-                if (flag.PlayerId == _player.OwnerClientId || !MatchManager.CanReach(position, flag, 0f)) continue;
+                if (flag.PlayerId == _player.PlayerId || !MatchManager.CanReach(position, flag, 0f)) continue;
 
                 Vector3 delta = flag.transform.position - position;
                 delta.y = 0f;

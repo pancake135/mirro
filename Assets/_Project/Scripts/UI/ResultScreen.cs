@@ -35,7 +35,7 @@ namespace Mirro.UI
             local.controller.IsPaused = true;
             local.controller.SetCursorLock(false);
 
-            Build(local.OwnerClientId, match, theme != null ? theme.accentColor : new Color(0.62f, 0.79f, 0.93f));
+            Build(local.PlayerId, match,theme != null ? theme.accentColor : new Color(0.62f, 0.79f, 0.93f));
         }
 
         private struct Rank
