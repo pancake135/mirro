@@ -58,10 +58,25 @@
 - 상단 알약 옆에 소지 아이템 표시(아이콘 대신 색 배지 + 한글 이름, 텍스트 기반 — 프로그래머 아트 원칙 유지). 없으면 숨김. 들고 있으면 "F: 사용" 힌트.
 - 아이템을 바라보면 "E: OO 줍기" 프롬프트(깃발 프롬프트와 같은 자리 스타일, 진행 막대 없음 — 탭 한 번).
 - 신의 손 사용 시 화면 중앙에 번호+색 목록 오버레이.
-- 레이더 사용 시 1초짜리 작은 미니맵(우상단, 점으로 상대 표시).
+- 레이더 사용 시 1초짜리 작은 미니맵(우상단): **미로의 벽 모양**(미로는 모든 피어가 이미 로컬에 갖고 있으므로 네트워크 없이 그 자리에서 한 번 그려서 캐시해두는 흑백 텍스처)을 바탕에 깔고, 그 위에 생존자 위치를 색 점으로 찍는다(북쪽 고정, 미로 전체를 한 번에 보여줌 — 크기가 10~50이라 전체를 담아도 점들이 구분된다).
 - 아이템 비주얼은 4종 각각 다른 저폴리 도형(구/원뿔/상자/쐐기 등, `Flag`의 절차적 모델과 같은 방식), 테마 강조색으로 살짝 물들인다.
 
-## 7. 기술 구조
+## 7. 사운드 & 파티클
+
+전부 Kenney.nl에서 받은 CC0(퍼블릭 도메인) 짧은 효과음(`Assets/_Project/Resources/Audio/Items/*.ogg`, 출처는 같은 폴더의 `SOURCES.md`)과, 이 프로젝트 최초의 `ParticleSystem` 사용(코드로만 구성 — 씬에 미리 만들어두는 파티클 프리팹 없음, 평면 색 위주라 기존 프로그래머 아트 느낌과 맞음)을 쓴다. BGM은 계속 빈 슬롯 원칙을 유지한다(이번 범위는 짧은 효과음/파티클만).
+
+- **로컬(내 화면에서만, 서버 확인 없이 즉시 — "손맛" 우선, 실패해도 손해 볼 게 없는 동작만):**
+  - 칼을 휘두르는 순간(F 누른 직후, 맞았는지와 무관) `item_knife.ogg` + 내 앞으로 짧게 스쳐 가는 베기 입자.
+  - 신의 손 목록을 열거나 숫자키로 항목을 훑을 때 `item_menu_select.ogg`(메뉴 틱 소리, 네트워크 필요 없음).
+- **서버가 확인해 주는 것에 얹어서(요청이 실제로 성공했을 때만 — 내 `HeldItem`/`RadarPulseRpc`가 바뀌는 걸 보고 재생):**
+  - 습득 성공 시(내 `HeldItem`이 None → 다른 값으로 바뀌는 순간) `item_pickup.ogg` + 습득 지점에 반짝이는 작은 입자 burst. 다른 사람이 먼저 주워서 요청이 거부되면 아무 소리도 안 남(false positive 없음).
+  - 레이더 사용 확인(`RadarPulseRpc`, 나에게만 옴)에 `item_radar.ogg` + 화면 가운데서 퍼지는 원형 펄스 입자를 같이 재생한다.
+- **반응형(누구 화면에서든 `NetworkVariable`이 바뀌는 걸 보고 그 자리에서 알아서 재생 — 원인이 번개든 칼이든 똑같이 동작):**
+  - `NetworkPlayer.StunnedUntil`이 늘어나는 걸 감지하면(=방금 새로 경직됨) 그 플레이어 위치에서 `item_lightning.ogg` + 전기 스파크 burst를 모든 피어가 각자 재생한다(번개로 전원이 맞아도, 칼로 한 명만 맞아도 이 하나의 훅으로 처리).
+- **신의 손 이동:** 대상이 된 사람의 화면에서만 순간이동 순간에 `item_godshand.ogg` + 화면 중앙 워프 입자를 재생한다(다른 사람 화면에는 위치가 갑자기 바뀌는 것만 보이고 별도 이펙트는 없음 — 과한 동기화 없이 이번 범위에서는 이 정도로 충분하다고 봄).
+- 모든 파티클은 0.3~0.6초짜리 1회성이고 재생 후 스스로 파괴된다(`Destroy(go, duration)`), 색은 해당 아이템/테마 강조색을 그대로 쓴다.
+
+## 8. 기술 구조
 
 - **`NetworkPlayer` 추가:** `NetworkVariable<int> HeldItem`(Everyone/Server), `NetworkVariable<double> StunnedUntil`(Everyone/Server), `IsStunnedNow` 헬퍼. `Update()`에서 로컬 사람이면 `controller.IsStunned = IsStunnedNow`로 다리를 놓는다. 새 RPC `RequestPickupItemRpc(ulong pickupNetworkObjectId)`, `UseItemRpc(ulong targetPlayerId = MatchManager.NoOne)` — `PullFlagRpc`와 같은 `[Rpc(SendTo.Server, InvokePermission = RpcInvokePermission.Owner)]` 패턴, 봇 여부/발신자 검증 포함. 레이더 확인용 `[Rpc(SendTo.Owner)] RadarPulseRpc()`.
 - **`MatchManager` 추가:** `ServerRequestPickup(playerId, pickupId)`(거리 검증 후 습득 처리 — 라이캐스트가 이미 벽을 막으므로 "같은 칸" 조건은 불필요, 단순 거리 검증), `ServerUseItem(playerId, targetPlayerId)`(종류별 분기·소모). `ServerBegin`에서 모드가 Versus/Bots면 `ItemSpawner`를 만들어 초기 배치를 시작한다(미로/칸 크기는 `MazeGameBootstrap.Instance`에서 읽는다, `CanReach`가 이미 하듯).
@@ -72,8 +87,11 @@
 - **`Scripts/Gameplay/ItemUser.cs`(신규, `FlagPuller`처럼 로컬 플레이어에만 붙음):** F 입력, 즉시형(번개/레이더/칼)은 바로 `UseItemRpc(NoOne)`, 신의 손은 목록 열기/숫자키 확정/닫기 처리. `IsAlive`/`IsStunned`/`IsPaused` 조건은 `FlagPuller`와 동일하게 검사.
 - **`BotSettings`에 `usesItems` 추가(어려움만 true). `BotBrain`에 습득/사용 로직 추가**(위 5절), 내부적으로 `MatchManager.Instance.ServerRequestPickup`/`ServerUseItem`을 사람과 똑같이 호출(RPC 우회, 봇은 서버 객체이므로 직접 호출).
 - **`MatchHud` 추가:** 소지 아이템 배지/프롬프트/신의 손 목록 오버레이/레이더 미니맵(6절).
+- **`Scripts/Items/ItemEffects.cs`(신규, 정적 헬퍼, 모든 피어에서 실행):** `PlaySound(AudioClip)`, `SpawnBurst(kind, position, color)` 같은 작은 함수 모음. 오디오 클립은 `Resources.Load<AudioClip>("Audio/Items/item_xxx")`로 불러온다(다른 리소스처럼 `Resources/Audio/Items/`에 둠). `NetworkPlayer`가 `StunnedUntil.OnValueChanged`에서 이 헬퍼를 호출해 경직 이펙트를 재생한다.
+- **`NetworkPlayer`에 신의 손 이동용 RPC 추가:** `[Rpc(SendTo.Owner)] TeleportToSpawnRpc()` — 서버가 신의 손 대상의 소유 클라이언트에만 보내고, 받은 쪽이 `TeleportTo(SpawnPosition, ...)`를 실행하면서 워프 이펙트도 그 자리에서 재생한다(이동은 소유자 권위이므로 서버가 남의 위치를 직접 바꿀 수 없어서 필요).
+- **미니맵 벽 텍스처:** `MatchHud`(또는 작은 헬퍼)가 매치 시작 때 `MazeGameBootstrap.Instance.Maze`로 흑백 `Texture2D`를 한 번 굽고 캐시해, 레이더를 쓸 때마다 `RawImage`에 그대로 쓴다(네트워크 없이 로컬 데이터로만 생성).
 
-## 8. 테스트
+## 9. 테스트
 
 - 셀프 테스트: `PlaceItemSpots` — 개수/중복 없음/간격/결정적(기존 `PlaceTreasures` 테스트와 같은 형식).
 - 플레이테스트(4인 대결 + 솔로 봇 대결):
@@ -81,14 +99,13 @@
   - 번개: 사용 즉시 나 제외 전원 1초 경직(이동 불가, 깃발 못 뽑음), 나는 그대로 움직임.
   - 신의 손: 목록에 살아있는 전원(나 포함) 표시, 숫자키로 고른 대상이 정확히 자기 시작 지점으로 이동.
   - 칼: 사거리/각도 안의 상대만 맞고, 연속 히트 시 경직 시간이 누적됨. 아무도 없으면 소모만 되고 아무 일 없음.
-  - 레이더: 사용 시 로컬에만 1초간 미니맵이 뜨고 서버 상태엔 부작용 없음.
+  - 레이더: 사용 시 로컬에만 1초간 미니맵(미로 벽 모양 포함)이 뜨고 서버 상태엔 부작용 없음.
   - 재생성: 습득 후 20초 뒤 새 자리에 새 아이템이 생김(자리는 기존 시작 칸/다른 아이템과 간격 유지).
   - 모드 제한: 깃발 찾기/자유 연습에는 아이템 지점이 하나도 없음.
   - 어려움 봇: 지나가다 아이템을 줍고, 사람이 가까이 가면 번개/칼을 쓰거나 신의 손으로 쫓아냄, 레이더는 즉시 써서 버림.
+  - 사운드/이펙트: 습득·칼 휘두르기·메뉴는 즉시(로컬), 레이더는 서버 확인 후, 경직은 원인(번개/칼) 상관없이 `StunnedUntil` 변화만으로 모든 피어에서 재생됨을 확인.
 - 기존 회귀(멀티 4/3/2, 솔로 3모드, 셀프테스트)는 그대로 통과해야 한다.
 
-## 9. 이번 범위에서 제외
+## 10. 이번 범위에서 제외
 
-- 쉬움/보통 봇의 아이템 사용.
-- 아이템 관련 사운드/파티클(BGM처럼 빈 슬롯 원칙 유지, 필요하면 나중에).
-- 레이더 미니맵에 벽/미로 형태 표시(이번엔 점만, 벽 지도는 범위 밖).
+- 쉬움/보통 봇의 아이템 사용(어려움 봇만 쓴다는 결정은 그대로 유지).
