@@ -164,6 +164,17 @@ namespace Mirro.Networking
                 nm.OnClientConnectedCallback -= OnLocalConnected;
                 nm.OnClientDisconnectCallback -= OnLocalDisconnect;
                 nm.Shutdown();
+            }
+
+            // Shutdown()이 이미 플레이어(카메라 포함)를 지운 상태이므로, 뒷정리가 끝나길 기다리는 동안
+            // 카메라 없는 화면을 보여주지 않도록 씬 전환을 먼저 한다(NetworkManager/NetworkFlow는
+            // DontDestroyOnLoad라 전환 중에도 살아남아 남은 뒷정리를 이어서 마친다).
+            GameSession.Clear();
+            if (loadMenuScene)
+                SceneManager.LoadScene(GameSession.MenuScene);
+
+            if (nm != null)
+            {
                 while (nm != null && nm.ShutdownInProgress)
                     yield return null;
             }
@@ -174,11 +185,7 @@ namespace Mirro.Networking
 
             Status = ConnectionStatus.Idle;
             FailureReason = null;
-            GameSession.Clear();
             IsLeaving = false;
-
-            if (loadMenuScene)
-                SceneManager.LoadScene(GameSession.MenuScene);
         }
 
         private bool PrepareManager()
