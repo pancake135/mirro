@@ -20,7 +20,7 @@ namespace Mirro.Core
         private const float SpawnTimeoutSeconds = 20f;
 
         [Header("Fallback (메뉴 없이 Game 씬을 직접 실행할 때만 사용)")]
-        [Tooltip("50, 70, 100, 120, 150, 170, 200 중 하나")]
+        [Tooltip("10, 30, 50 중 하나")]
         public int mazeSize = 50;
         public int seed = 12345;
         public SeasonTheme fallbackSeason = SeasonTheme.Spring;

@@ -15,7 +15,7 @@ namespace Mirro.EditorTools
     /// </summary>
     public static class MazeSelfTest
     {
-        private static readonly int[] Sizes = { 50, 70, 100, 120, 150, 170, 200 };
+        private static readonly int[] Sizes = { 10, 30, 50 };
 
         [MenuItem("Mirro/Run Maze Self Test")]
         public static void RunFromMenu() => Run();
@@ -49,8 +49,8 @@ namespace Mirro.EditorTools
             if (!same || !differs) allOk = false;
             Debug.Log($"[MirroTest] determinism: sameSeedIdentical={same} differentSeedDiffers={differs}");
 
-            allOk &= TestBuild(200);
             allOk &= TestBuild(50);
+            allOk &= TestBuild(10);
             allOk &= TestSpawnPlacement();
             allOk &= TestBots();
             allOk &= TestTreasures();
@@ -129,11 +129,11 @@ namespace Mirro.EditorTools
         private static bool TestSpawnPlacement()
         {
             bool allOk = true;
-            var sizes = new[] { 50, 100, 200 };
+            var sizes = new[] { 10, 30, 50 };
 
             foreach (int size in sizes)
             {
-                int seeds = size >= 200 ? 8 : 25;
+                int seeds = 25;
 
                 // 경로 거리 계산 자체 검증: 모든 통로에서 양 끝 칸의 거리 차가 정확히 1이면 BFS 거리와 같다(트리 미로).
                 var probe = MazeGenerator.Generate(size, 4242);
@@ -310,7 +310,7 @@ namespace Mirro.EditorTools
         private static bool TestTreasures()
         {
             bool allOk = true;
-            foreach (int size in new[] { 50, 100, 200 })
+            foreach (int size in new[] { 10, 30, 50 })
             {
                 int count = size / 10;
                 var maze = MazeGenerator.Generate(size, 5150 + size);

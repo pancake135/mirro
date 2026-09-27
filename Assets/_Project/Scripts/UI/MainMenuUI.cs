@@ -344,7 +344,7 @@ namespace Mirro.UI
             UIFactory.SetBox(_sizeSubtitle.rectTransform, new Vector2(0f, 320f), new Vector2(1000f, 60f));
 
             var sizes = GameSession.AllowedSizes;
-            const int firstRowCount = 4;
+            int firstRowCount = Mathf.Min(4, sizes.Length);
             const float spacing = 270f;
             for (int i = 0; i < sizes.Length; i++)
             {

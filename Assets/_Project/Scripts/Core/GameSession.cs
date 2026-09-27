@@ -11,7 +11,7 @@ namespace Mirro.Core
         public const string MenuScene = "MainMenu";
         public const string GameScene = "Game";
 
-        public static readonly int[] AllowedSizes = { 50, 70, 100, 120, 150, 170, 200 };
+        public static readonly int[] AllowedSizes = { 10, 30, 50 };
 
         public static bool HasSelection { get; private set; }
         public static MazeThemeConfig Theme { get; private set; }
