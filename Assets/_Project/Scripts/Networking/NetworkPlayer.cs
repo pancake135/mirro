@@ -4,6 +4,7 @@ using Unity.Netcode;
 using Unity.Netcode.Components;
 using UnityEngine;
 using Mirro.Gameplay;
+using Mirro.Items;
 using Mirro.Maze;
 using Mirro.Player;
 
@@ -29,6 +30,12 @@ namespace Mirro.Networking
         /// <summary>이 플레이어의 상하 시선 각도. 좌우 회전은 NetworkTransform이 실어 나르지만 상하는 없어서 소유자가 따로 알린다(관전용).</summary>
         public readonly NetworkVariable<float> LookPitch = new NetworkVariable<float>(0f,
             NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Owner);
+
+        /// <summary>들고 있는 아이템(ItemType). 서버가 정하고 모든 피어에 복제된다.</summary>
+        public readonly NetworkVariable<int> HeldItem = new NetworkVariable<int>((int)ItemType.None);
+
+        /// <summary>이 서버 시각(초)까지 경직. 서버가 정한다. 경직 중에는 이동/시야/상호작용/아이템 사용이 막힌다.</summary>
+        public readonly NetworkVariable<double> StunnedUntil = new NetworkVariable<double>(0.0);
 
         // 소유자 권위 NetworkTransform에서는 서버가 정한 스폰 위치가 소유자 쪽 인스턴스에 반영되지 않고 원점에서
         // 생성된다. 그래서 스폰 위치/방향을 스폰 페이로드(OnSynchronize)에 실어 보내 모든 피어가 직접 맞춘다.
@@ -62,6 +69,15 @@ namespace Mirro.Networking
 
         /// <summary>이 화면을 조작하는 사람의 캐릭터인지. 봇은 서버가 소유하므로 IsOwner만으로는 구별할 수 없다.</summary>
         public bool IsLocalHuman => IsOwner && !_isBot;
+
+        public ItemType Held => (ItemType)HeldItem.Value;
+
+        public bool IsStunnedNow => NetworkManager != null && NetworkManager.IsListening && NetworkManager.ServerTime.Time < StunnedUntil.Value;
+
+        /// <summary>레이더 미니맵이 떠 있는 동안 true(내 화면 전용).</summary>
+        public bool RadarActive => Time.unscaledTime < _radarUntil;
+
+        private float _radarUntil;
 
         public static NetworkPlayer Find(ulong playerId)
         {
@@ -98,6 +114,7 @@ namespace Mirro.Networking
             All.Add(this);
             ColorIndex.OnValueChanged += OnColorChanged;
             IsAlive.OnValueChanged += OnAliveChanged;
+            StunnedUntil.OnValueChanged += OnStunnedChanged;
 
             ApplySpawnPose();
 
@@ -113,8 +130,13 @@ namespace Mirro.Networking
 
         private void Update()
         {
+            if (!IsSpawned) return;
+
+            // 경직은 서버가 정한 시각까지 유지되고, 내 캐릭터는 그동안 컨트롤러 입력이 막힌다.
+            if (IsLocalHuman) controller.IsStunned = IsStunnedNow;
+
             // 상하 시선은 자주 바뀌므로 조금이라도 달라졌을 때만, 초당 20번 이하로 보낸다.
-            if (!IsSpawned || !IsLocalHuman || Time.unscaledTime < _nextPitchSync) return;
+            if (!IsLocalHuman || Time.unscaledTime < _nextPitchSync) return;
 
             float pitch = controller.Pitch;
             if (Mathf.Abs(pitch - LookPitch.Value) < 0.25f) return;
@@ -129,6 +151,53 @@ namespace Mirro.Networking
         {
             if (_isBot || rpcParams.Receive.SenderClientId != OwnerClientId) return;
             MatchManager.Instance?.ServerTryPullFlag(PlayerId, targetPlayerId);
+        }
+
+        /// <summary>아이템 줍기 요청. 서버가 거리/생존/경직을 다시 검증한 뒤에만 슬롯이 바뀐다.</summary>
+        [Rpc(SendTo.Server, InvokePermission = RpcInvokePermission.Owner)]
+        public void RequestPickupItemRpc(ulong pickupObjectId, RpcParams rpcParams = default)
+        {
+            if (_isBot || rpcParams.Receive.SenderClientId != OwnerClientId) return;
+            MatchManager.Instance?.ServerRequestPickup(PlayerId, pickupObjectId);
+        }
+
+        /// <summary>들고 있는 아이템 사용 요청(신의 손은 대상 PlayerId, 나머지는 MatchManager.NoOne).</summary>
+        [Rpc(SendTo.Server, InvokePermission = RpcInvokePermission.Owner)]
+        public void UseItemRpc(ulong targetPlayerId, RpcParams rpcParams = default)
+        {
+            if (_isBot || rpcParams.Receive.SenderClientId != OwnerClientId) return;
+            MatchManager.Instance?.ServerUseItem(PlayerId, targetPlayerId);
+        }
+
+        /// <summary>줍기가 서버에서 승인됐을 때만 내 화면에서 습득 효과를 재생한다.</summary>
+        [Rpc(SendTo.Owner)]
+        public void PickupConfirmedRpc(Vector3 position)
+        {
+            if (IsLocalHuman) ItemEffects.PlayPickup(position);
+        }
+
+        /// <summary>레이더 사용 승인: 내 화면에 1초짜리 미니맵과 효과를 띄운다.</summary>
+        [Rpc(SendTo.Owner)]
+        public void RadarPulseRpc()
+        {
+            if (!IsLocalHuman) return;
+            _radarUntil = Time.unscaledTime + ItemRules.RadarSeconds;
+            ItemEffects.PlayRadar(transform.position + Vector3.up * 1f);
+        }
+
+        /// <summary>신의 손: 이동은 소유자 권위라 서버가 남의 위치를 직접 못 바꾸므로, 대상의 소유 화면이 스스로 시작 지점으로 순간이동한다.</summary>
+        [Rpc(SendTo.Owner)]
+        public void TeleportToSpawnRpc()
+        {
+            TeleportTo(_spawnPosition, Quaternion.Euler(0f, _spawnYaw, 0f));
+            if (IsLocalHuman) ItemEffects.PlayTeleport(_spawnPosition + Vector3.up * 1f);
+        }
+
+        private void OnStunnedChanged(double previous, double current)
+        {
+            // 새로 경직되거나 경직이 늘어날 때만(번개든 칼이든 같은 훅으로 처리한다).
+            double now = NetworkManager != null ? NetworkManager.ServerTime.Time : 0.0;
+            if (current > now && current > previous) ItemEffects.PlayStunned(transform.position + Vector3.up * 1f);
         }
 
         /// <summary>관전 중인 사람이 이 캐릭터의 눈으로 보고 있을 때 몸체가 화면에 걸리지 않도록 숨긴다.</summary>
@@ -201,6 +270,7 @@ namespace Mirro.Networking
             All.Remove(this);
             ColorIndex.OnValueChanged -= OnColorChanged;
             IsAlive.OnValueChanged -= OnAliveChanged;
+            StunnedUntil.OnValueChanged -= OnStunnedChanged;
             if (Local == this) Local = null;
         }
 

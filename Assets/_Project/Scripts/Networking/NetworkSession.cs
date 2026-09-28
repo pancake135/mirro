@@ -5,6 +5,7 @@ using UnityEngine;
 using UnityEngine.SceneManagement;
 using Mirro.Core;
 using Mirro.Gameplay;
+using Mirro.Items;
 using Mirro.Themes;
 
 namespace Mirro.Networking
@@ -170,6 +171,9 @@ namespace Mirro.Networking
         {
             foreach (var flag in Flag.All.ToArray())
                 if (flag.IsSpawned) flag.NetworkObject.Despawn(true);
+
+            foreach (var pickup in ItemPickup.All.ToArray())
+                if (pickup.IsSpawned) pickup.NetworkObject.Despawn(true);
 
             var match = MatchManager.Instance;
             if (match != null && match.IsSpawned) match.NetworkObject.Despawn(true);

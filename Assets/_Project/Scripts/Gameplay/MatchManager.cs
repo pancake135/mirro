@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using Unity.Netcode;
 using UnityEngine;
 using Mirro.Core;
+using Mirro.Items;
 using Mirro.Maze;
 using Mirro.Networking;
 
@@ -73,6 +74,7 @@ namespace Mirro.Gameplay
         private readonly HashSet<ulong> _alive = new HashSet<ulong>();
         private readonly Dictionary<ulong, int> _colors = new Dictionary<ulong, int>();
         private ulong _humanId = NoOne;
+        private ItemSpawner _items;
 
         public GameMode CurrentMode => (GameMode)Mode.Value;
 
@@ -166,6 +168,19 @@ namespace Mirro.Gameplay
             foreach (var treasure in treasures)
                 SpawnFlag(flagPrefab, treasure.id, 0, treasure.position, treasure.yaw);
 
+            if (mode == GameMode.Versus || mode == GameMode.Bots)
+            {
+                var bootstrap = MazeGameBootstrap.Instance;
+                if (bootstrap != null && bootstrap.Maze != null)
+                {
+                    var starts = new List<Vector2Int>();
+                    foreach (var matchPlayer in players)
+                        starts.Add(SpawnPlacer.CellAt(matchPlayer.flagPosition, bootstrap.CellSize));
+                    _items = gameObject.AddComponent<ItemSpawner>();
+                    _items.Begin(bootstrap.Maze, bootstrap.CellSize, starts);
+                }
+            }
+
             TotalPlayers.Value = players.Count;
             TotalTreasures.Value = treasures.Count;
             StartTime.Value = NetworkManager.ServerTime.Time;
@@ -178,6 +193,111 @@ namespace Mirro.Gameplay
             var go = Instantiate(prefab, position, Quaternion.Euler(0f, yaw, 0f));
             go.GetComponent<Flag>().InitServer(id, colorIndex);
             go.GetComponent<NetworkObject>().Spawn(true);
+        }
+
+        /// <summary>아이템 줍기 요청을 검증하고 통과하면 슬롯에 넣는다(기존 아이템은 교체). 처리했으면 true.</summary>
+        public bool ServerRequestPickup(ulong playerId, ulong pickupObjectId)
+        {
+            if (!IsServer || Finished.Value || _items == null || !_alive.Contains(playerId)) return false;
+
+            var player = NetworkPlayer.Find(playerId);
+            var pickup = ItemPickup.FindByObjectId(pickupObjectId);
+            if (player == null || pickup == null || !pickup.IsSpawned || player.IsStunnedNow) return false;
+
+            Vector3 delta = pickup.transform.position - player.transform.position;
+            delta.y = 0f;
+            if (delta.magnitude > ItemRules.PickupServerRange) return false;
+
+            Vector3 at = pickup.transform.position;
+            player.HeldItem.Value = (int)pickup.Type;
+            _items.OnPickedUp(pickup);
+            if (!player.IsBot) player.PickupConfirmedRpc(at);
+            return true;
+        }
+
+        /// <summary>
+        /// 들고 있는 아이템을 쓴다. 신의 손은 대상(살아 있는 누구든, 나 포함)을 그의 시작 지점으로 보내고, 번개는 나 외 전원을 경직시키고,
+        /// 레이더는 나에게 미니맵을 띄우고, 칼은 정면 가까운 상대 한 명을 경직시킨다. 쓰면 슬롯이 빈다(신의 손은 대상이 없으면 소모하지 않음).
+        /// </summary>
+        public bool ServerUseItem(ulong playerId, ulong targetPlayerId)
+        {
+            if (!IsServer || Finished.Value || !_alive.Contains(playerId)) return false;
+
+            var caster = NetworkPlayer.Find(playerId);
+            if (caster == null || !caster.IsSpawned || caster.IsStunnedNow) return false;
+
+            switch (caster.Held)
+            {
+                case ItemType.GodsHand:
+                    var target = NetworkPlayer.Find(targetPlayerId);
+                    if (target == null || !target.IsSpawned || !_alive.Contains(targetPlayerId)) return false;
+                    target.TeleportToSpawnRpc();
+                    break;
+                case ItemType.Lightning:
+                    foreach (var other in NetworkPlayer.All.ToArray())
+                        if (other != caster && other.IsSpawned && _alive.Contains(other.PlayerId))
+                            Stun(other, ItemRules.LightningStunSeconds, false);
+                    break;
+                case ItemType.Radar:
+                    if (!caster.IsBot) caster.RadarPulseRpc();
+                    break;
+                case ItemType.Knife:
+                    var hit = FindKnifeTarget(caster);
+                    if (hit != null) Stun(hit, ItemRules.KnifeStunSeconds, true);
+                    break;
+                default:
+                    return false;
+            }
+
+            caster.HeldItem.Value = (int)ItemType.None;
+            return true;
+        }
+
+        private void Stun(NetworkPlayer player, float seconds, bool accumulate)
+        {
+            double now = NetworkManager.ServerTime.Time;
+            double current = player.StunnedUntil.Value;
+            player.StunnedUntil.Value = accumulate ? Math.Max(now, current) + seconds : Math.Max(current, now + seconds);
+        }
+
+        /// <summary>캐스터의 위치와 정면 기준 사거리/각도 안에서 벽에 가리지 않은 가장 가까운 살아 있는 상대.</summary>
+        private NetworkPlayer FindKnifeTarget(NetworkPlayer caster)
+        {
+            Vector3 origin = caster.transform.position;
+            Vector3 forward = caster.transform.forward;
+            forward.y = 0f;
+            if (forward.sqrMagnitude < 0.0001f) return null;
+            forward.Normalize();
+
+            float maxDistance = ItemRules.KnifeRange + ItemRules.KnifeServerSlack;
+            NetworkPlayer best = null;
+            float bestDistance = maxDistance;
+            foreach (var other in NetworkPlayer.All)
+            {
+                if (other == caster || !other.IsSpawned || !_alive.Contains(other.PlayerId)) continue;
+
+                Vector3 delta = other.transform.position - origin;
+                delta.y = 0f;
+                float distance = delta.magnitude;
+                if (distance > maxDistance || distance < 0.01f) continue;
+                if (Vector3.Dot(forward, delta / distance) < ItemRules.KnifeCosHalfAngle) continue;
+                if (distance >= bestDistance || WallBetween(origin + Vector3.up, other.transform.position + Vector3.up)) continue;
+
+                best = other;
+                bestDistance = distance;
+            }
+            return best;
+        }
+
+        private static bool WallBetween(Vector3 from, Vector3 to)
+        {
+            Vector3 delta = to - from;
+            float distance = delta.magnitude;
+            if (distance < 0.01f) return false;
+
+            foreach (var hit in Physics.RaycastAll(from, delta / distance, distance, ~0, QueryTriggerInteraction.Ignore))
+                if (hit.collider.GetComponentInParent<NetworkPlayer>() == null) return true;
+            return false;
         }
 
         /// <summary>깃발 뽑기 요청을 검증하고 통과하면 주인을 탈락시킨다(금색 깃발이면 수집). 처리했으면 true.</summary>

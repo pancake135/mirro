@@ -35,6 +35,9 @@ namespace Mirro.Player
         /// <summary>일시정지 메뉴가 열려 있는 동안 true. 입력만 막을 뿐 월드는 계속 진행된다.</summary>
         public bool IsPaused { get; set; }
 
+        /// <summary>지금 바라보고 있는 상호작용 대상(사거리 안). HUD가 "E: 줍기" 안내를 미리 띄우는 데 쓴다.</summary>
+        public IInteractable LookTarget { get; private set; }
+
         private CharacterController _controller;
         private float _verticalVelocity;
         private float _pitch;
@@ -63,7 +66,11 @@ namespace Mirro.Player
             var mouse = Mouse.current;
             if (keyboard == null || mouse == null) return;
 
-            if (IsStunned || IsPaused) return;
+            if (IsStunned || IsPaused)
+            {
+                LookTarget = null;
+                return;
+            }
 
             HandleLook(mouse);
             HandleMove(keyboard);
@@ -114,14 +121,19 @@ namespace Mirro.Player
 
         private void HandleInteract(Keyboard keyboard)
         {
-            if (!keyboard.eKey.wasPressedThisFrame || playerCamera == null) return;
+            LookTarget = FindLookTarget();
+            if (LookTarget != null && keyboard.eKey.wasPressedThisFrame)
+                LookTarget.Interact(gameObject);
+        }
+
+        private IInteractable FindLookTarget()
+        {
+            if (playerCamera == null) return null;
 
             if (Physics.Raycast(playerCamera.transform.position, playerCamera.transform.forward,
                     out var hit, interactRange, interactableMask, QueryTriggerInteraction.Collide))
-            {
-                var interactable = hit.collider.GetComponentInParent<IInteractable>();
-                interactable?.Interact(gameObject);
-            }
+                return hit.collider.GetComponentInParent<IInteractable>();
+            return null;
         }
     }
 }

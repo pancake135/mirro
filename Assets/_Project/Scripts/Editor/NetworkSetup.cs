@@ -6,6 +6,7 @@ using Unity.Netcode.Transports.UTP;
 using UnityEditor;
 using UnityEngine;
 using Mirro.Gameplay;
+using Mirro.Items;
 using Mirro.Networking;
 using Mirro.Player;
 
@@ -23,6 +24,7 @@ namespace Mirro.EditorTools
         private const string PlayerPath = PrefabDir + "/Player.prefab";
         private const string FlagPath = PrefabDir + "/Flag.prefab";
         private const string MatchPath = PrefabDir + "/MatchManager.prefab";
+        private const string ItemPath = PrefabDir + "/ItemPickup.prefab";
         private const string ManagerPath = PrefabDir + "/NetworkManager.prefab";
 
         public static void CreateAll()
@@ -34,10 +36,11 @@ namespace Mirro.EditorTools
             var player = CreatePlayerPrefab();
             var flag = CreateFlagPrefab();
             var match = CreateMatchPrefab();
+            var item = CreateItemPrefab();
             AssetDatabase.SaveAssets();
             AssetDatabase.Refresh();
 
-            var list = EnsurePrefabList(session, player, flag, match);
+            var list = EnsurePrefabList(session, player, flag, match, item);
             CreateManagerPrefab(list);
             AssetDatabase.SaveAssets();
         }
@@ -48,6 +51,14 @@ namespace Mirro.EditorTools
             go.AddComponent<NetworkObject>();
             go.AddComponent<Flag>();
             return SavePrefab(go, FlagPath);
+        }
+
+        private static GameObject CreateItemPrefab()
+        {
+            var go = new GameObject("ItemPickup");
+            go.AddComponent<NetworkObject>();
+            go.AddComponent<ItemPickup>();
+            return SavePrefab(go, ItemPath);
         }
 
         private static GameObject CreateMatchPrefab()
