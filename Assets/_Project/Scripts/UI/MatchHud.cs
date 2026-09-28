@@ -352,13 +352,13 @@ namespace Mirro.UI
         private void BuildItemUi()
         {
             _itemBadge = UIFactory.NewRect("ItemBadge", _canvasRt);
-            UIFactory.SetBox(_itemBadge, new Vector2(700f, -450f), new Vector2(420f, 100f));
+            UIFactory.SetBox(_itemBadge, new Vector2(700f, -400f), new Vector2(420f, 100f));
             _itemBadgeBg = UIFactory.AddRounded(_itemBadge, new Color(0f, 0f, 0f, 0.6f), 40f);
             _itemBadgeText = UIFactory.AddLabel(_itemBadge, "Text", string.Empty, 40, Color.white, FontStyle.Bold);
             _itemBadge.gameObject.SetActive(false);
 
             _itemPrompt = UIFactory.NewRect("ItemPrompt", _canvasRt);
-            UIFactory.SetBox(_itemPrompt, new Vector2(0f, -240f), new Vector2(720f, 90f));
+            UIFactory.SetBox(_itemPrompt, new Vector2(0f, 170f), new Vector2(720f, 90f));
             UIFactory.AddRounded(_itemPrompt, new Color(0f, 0f, 0f, 0.55f), 36f);
             _itemPromptText = UIFactory.AddLabel(_itemPrompt, "Text", string.Empty, 40, Color.white, FontStyle.Bold);
             _itemPrompt.gameObject.SetActive(false);

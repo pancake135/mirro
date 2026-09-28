@@ -14,6 +14,7 @@ using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 using Mirro.Core;
 using Mirro.Gameplay;
+using Mirro.Items;
 using Mirro.Maze;
 using Mirro.Networking;
 using Mirro.Themes;
@@ -27,6 +28,7 @@ namespace Mirro.Testing
     /// 남긴 뒤 종료 코드로 결과를 알린다(테스트 중에는 마우스/키보드를 만지지 않는 게 좋다).
     /// 인자: -mirroRole solo|host|client  -mirroTag &lt;이름&gt;  -mirroOut &lt;폴더&gt;  -mirroSize &lt;50~200&gt;
     ///       -mirroSeason &lt;Spring|Summer|Autumn|Winter&gt;  -mirroPlayers &lt;총 인원&gt;  -mirroIp &lt;방장 주소&gt;
+    ///       -mirroScenario items(2인 멀티에서 아이템 복제/RPC 경로 검증)
     /// solo = 혼자 방을 만들어 이동/점프/시점/충돌/일시정지를 검증, host/client = 여러 프로세스가 함께 접속해 복제/이탈을 검증.
     /// </summary>
     public class PlaytestDriver : MonoBehaviour
@@ -45,6 +47,7 @@ namespace Mirro.Testing
         private bool _earlyExit;
         private int _firstSeed;
         private int _rejectedPulls;
+        private string _scenario = string.Empty;
         private int _failures;
         private readonly List<string> _report = new List<string>();
         private readonly HashSet<string> _errors = new HashSet<string>();
@@ -64,6 +67,7 @@ namespace Mirro.Testing
             d._tag = ReadArg(args, "-mirroTag") ?? d._role;
             d._ip = ReadArg(args, "-mirroIp") ?? "127.0.0.1";
             d._season = ReadArg(args, "-mirroSeason") ?? "Spring";
+            d._scenario = ReadArg(args, "-mirroScenario") ?? string.Empty;
             if (int.TryParse(ReadArg(args, "-mirroSize"), out int size)) d._size = size;
             if (int.TryParse(ReadArg(args, "-mirroPlayers"), out int players)) d._players = Mathf.Clamp(players, 1, 4);
             if (d._role.StartsWith("solo")) d._players = 1;
@@ -268,14 +272,15 @@ namespace Mirro.Testing
                 yield break;
             }
 
-            if (_role == "solobots" || _role == "solohunt" || _role == "solopractice")
+            if (_role == "solobots" || _role == "solohunt" || _role == "solopractice" || _role == "soloitems")
             {
                 yield return SoloModeMenuFlow();
                 if (_abort) { Finish(); yield break; }
                 yield return WaitFor(() => NetworkPlayer.Local != null, 60f, "solo game scene loaded and local player spawned");
                 if (_abort) { Finish(); yield break; }
 
-                if (_role == "solobots") yield return SoloBotsChecks();
+                if (_role == "soloitems") yield return SoloItemChecks();
+                else if (_role == "solobots") yield return SoloBotsChecks();
                 else if (_role == "solohunt") yield return SoloHuntChecks();
                 else yield return SoloPracticeChecks();
                 Finish();
@@ -633,7 +638,7 @@ namespace Mirro.Testing
         /// <summary>실제 클릭으로 타이틀 → 혼자 하기 → 모드 카드 → 테마 → 크기 → (봇 설정) → 시작까지 진행한다(대기실 없이 시작).</summary>
         private IEnumerator SoloModeMenuFlow()
         {
-            string mode = _role == "solobots" ? "Bots" : _role == "solohunt" ? "Treasure" : "Practice";
+            string mode = _role == "solobots" || _role == "soloitems" ? "Bots" : _role == "solohunt" ? "Treasure" : "Practice";
 
             yield return ClickUi(MenuNode("TitleScreen/SoloButton"), "solo button", () => MenuScreenActive("SoloModeScreen"));
             Check(MenuScreenActive("SoloModeScreen"), "solo mode screen shown");
@@ -648,7 +653,7 @@ namespace Mirro.Testing
             var ring = MenuNode($"SizeScreen/Size_{_size}/Ring");
             yield return ClickUi(MenuNode($"SizeScreen/Size_{_size}/Base"), "size button " + _size, () => ring.gameObject.activeSelf);
 
-            if (_role == "solobots")
+            if (_role == "solobots" || _role == "soloitems")
             {
                 yield return ClickUi(MenuNode("SizeScreen/StartButton"), "size confirm button", () => MenuScreenActive("BotOptionsScreen"));
                 Check(MenuScreenActive("BotOptionsScreen"), "bot options screen shown for the bot mode");
@@ -668,7 +673,8 @@ namespace Mirro.Testing
 
         private IEnumerator SoloBotsChecks()
         {
-            // 출발 지연을 짧게, 속도를 2배로 해서 봇의 움직임을 짧은 시간에 확인한다.
+            // 출발 지연을 짧게, 속도를 2배로 해서 봇의 움직임을 짧은 시간에 확인한다(아이템 사용은 별도 시나리오에서 검증).
+            BotBrain.ItemsEnabled = false;
             BotBrain.StartDelayOverride = 4f;
             BotBrain.SpeedMultiplier = 2f;
             var local = NetworkPlayer.Local;
@@ -780,6 +786,210 @@ namespace Mirro.Testing
             yield return VerifyBackAtMenu(false);
             BotBrain.StartDelayOverride = -1f;
             BotBrain.SpeedMultiplier = 1f;
+            BotBrain.ItemsEnabled = true;
+        }
+
+        private IEnumerator SoloItemChecks()
+        {
+            BotBrain.StartDelayOverride = 9999f;
+            BotBrain.ItemsEnabled = true;
+            ItemSpawner.RespawnSecondsOverride = 3f;
+            ItemEffects.PlayCounts.Clear();
+
+            var local = NetworkPlayer.Local;
+            float cell = MazeGameBootstrap.Instance.CellSize;
+            int total = ItemRules.SpotCount(_size);
+
+            yield return WaitFor(() => MatchManager.Instance != null && NetworkPlayer.All.Count == 4 && Flag.All.Count == 4 && ItemPickup.All.Count == total,
+                30f, $"the player, 3 bots, 4 flags and {total} item pickups exist");
+            if (_abort) yield break;
+            var bots = new List<NetworkPlayer>();
+            foreach (var p in NetworkPlayer.All) if (p.IsBot) bots.Add(p);
+
+            // ---- A. 배치 ----
+            var starts = new List<Vector2Int>();
+            foreach (var flag in Flag.All) starts.Add(SpawnPlacer.CellAt(flag.transform.position, cell));
+            var cells = new HashSet<Vector2Int>();
+            bool offStarts = true, typesValid = true;
+            foreach (var pickup in ItemPickup.All)
+            {
+                var c = SpawnPlacer.CellAt(pickup.transform.position, cell);
+                cells.Add(c);
+                offStarts &= !starts.Contains(c);
+                typesValid &= pickup.Type != ItemType.None;
+            }
+            Check(cells.Count == total && offStarts && typesValid, $"{total} item pickups sit on distinct cells away from the start cells");
+            yield return Shot("06_items_spawn");
+
+            // ---- B. 실제 E 키로 줍기, 슬롯 교체 ----
+            var first = ItemPickup.All[0];
+            var firstType = first.Type;
+            yield return PickUpWithKeyboard(first);
+            if (_abort) yield break;
+            yield return WaitFor(() => local.Held == firstType, 5f, $"the slot holds the picked-up {ItemInfo.DisplayName(firstType)}");
+            var badge = HudNode("ItemBadge");
+            Check(badge.gameObject.activeSelf && badge.Find("Text").GetComponent<Text>().text.StartsWith(ItemInfo.DisplayName(firstType)), "the HUD badge shows the held item");
+            Check(PlayCount(ItemEffects.Pickup) >= 1, "the pickup effect played");
+            yield return Shot("07_item_held");
+
+            var second = ItemPickup.All[0];
+            var secondType = second.Type;
+            yield return PickUpWithKeyboard(second);
+            if (_abort) yield break;
+            yield return WaitFor(() => local.Held == secondType, 5f, $"picking up a second item replaces the first ({ItemInfo.DisplayName(secondType)})");
+
+            // ---- C. 번개: 나 빼고 전원 경직 ----
+            local.HeldItem.Value = (int)ItemType.Lightning;
+            yield return new WaitForSeconds(0.3f);
+            ItemEffects.PlayCounts.Clear();
+            yield return TapKey(Key.F);
+            yield return WaitFor(() => bots.TrueForAll(b => b.IsStunnedNow), 3f, "lightning stuns every bot");
+            Check(!local.IsStunnedNow && local.Held == ItemType.None, "the caster is not stunned and the slot is empty");
+            Check(PlayCount(ItemEffects.Lightning) >= 3, $"the stun effect played for the three stunned bots ({PlayCount(ItemEffects.Lightning)})");
+            yield return new WaitForSeconds(1.5f);
+            Check(bots.TrueForAll(b => !b.IsStunnedNow), "the stun wears off after about a second");
+
+            // ---- D. 경직된 사람은 움직이지 못한다 ----
+            local.StunnedUntil.Value = NetworkManager.Singleton.ServerTime.Time + 1.5;
+            yield return WaitFor(() => local.controller.IsStunned, 2f, "a stun reaches the local controller");
+            Vector3 p0 = local.transform.position;
+            yield return Hold(0.6f, Key.W);
+            Check(Vector3.Distance(p0, local.transform.position) < 0.1f, "a stunned player cannot move");
+            yield return new WaitForSeconds(1.3f);
+            Check(!local.controller.IsStunned, "the stun wears off on the controller");
+            p0 = local.transform.position;
+            yield return Hold(0.6f, Key.W);
+            Check(Vector3.Distance(p0, local.transform.position) > 0.5f, "the player moves again after the stun");
+
+            // ---- E. 칼: 정면 사거리 안만, 누적, 헛스윙 ----
+            var arena = SpawnPlacer.CellCenter(SpawnPlacer.CellAt(local.transform.position, cell), cell);
+            Vector3 standAt = new Vector3(arena.x, 0.1f, arena.z - 1.4f);
+            var victim = bots[0];
+            local.TeleportTo(standAt, Quaternion.identity);
+            victim.TeleportTo(standAt + Vector3.forward * 2f, Quaternion.identity);
+            local.HeldItem.Value = (int)ItemType.Knife;
+            yield return new WaitForSeconds(0.6f);
+            ItemEffects.PlayCounts.Clear();
+            yield return TapKey(Key.F);
+            Check(PlayCount(ItemEffects.Knife) >= 1, "the knife swing plays locally right away");
+            yield return WaitFor(() => victim.IsStunnedNow, 3f, "the knife stuns the bot in front");
+            Check(!bots[1].IsStunnedNow && !bots[2].IsStunnedNow && !local.IsStunnedNow, "only the bot in front is stunned");
+            double until1 = victim.StunnedUntil.Value;
+
+            local.HeldItem.Value = (int)ItemType.Knife;
+            yield return new WaitForSeconds(0.3f);
+            yield return TapKey(Key.F);
+            yield return WaitFor(() => victim.StunnedUntil.Value > until1 + 0.5, 3f, "a second knife hit adds about another second");
+            double until2 = victim.StunnedUntil.Value;
+
+            local.TeleportTo(standAt, Quaternion.Euler(0f, 180f, 0f));
+            local.HeldItem.Value = (int)ItemType.Knife;
+            yield return new WaitForSeconds(0.6f);
+            yield return TapKey(Key.F);
+            yield return new WaitForSeconds(0.6f);
+            Check(local.Held == ItemType.None && Mathf.Approximately((float)victim.StunnedUntil.Value, (float)until2), "a knife swung at nobody is used up and hits nobody");
+            yield return new WaitForSeconds(3f);
+
+            // ---- F. 신의 손: 대상 목록, 대상 선택, 취소, 나 자신 ----
+            var target = bots[1];
+            local.TeleportTo(standAt, Quaternion.identity);
+            target.TeleportTo(standAt + Vector3.forward * 1.5f, Quaternion.identity);
+            local.HeldItem.Value = (int)ItemType.GodsHand;
+            yield return new WaitForSeconds(0.6f);
+            var itemUser = local.GetComponent<ItemUser>();
+            yield return TapKey(Key.F);
+            Check(itemUser.TargetMenuOpen && HudNode("GodsHandMenu").gameObject.activeSelf, "F opens the God's Hand target list");
+            int activeRows = 0;
+            for (int r = 0; r < 4; r++) if (HudNode("GodsHandMenu/Row" + r).gameObject.activeSelf) activeRows++;
+            Check(activeRows == 4, $"the list shows every living player including me ({activeRows})");
+            yield return Shot("08_gods_hand_menu");
+            yield return TapKey(DigitKeys[target.ColorIndex.Value]);
+            yield return WaitFor(() => Vector3.Distance(target.transform.position, target.SpawnPosition) < 1.5f, 3f, "the chosen bot is sent to its own start point");
+            Check(local.Held == ItemType.None && !itemUser.TargetMenuOpen, "the slot is empty and the list is closed");
+
+            local.HeldItem.Value = (int)ItemType.GodsHand;
+            yield return new WaitForSeconds(0.4f);
+            yield return TapKey(Key.F);
+            yield return TapKey(Key.F);
+            Check(!itemUser.TargetMenuOpen && local.Held == ItemType.GodsHand, "F again closes the list without using the item");
+
+            local.TeleportTo(standAt, Quaternion.identity);
+            yield return new WaitForSeconds(0.6f);
+            yield return TapKey(Key.F);
+            yield return TapKey(DigitKeys[local.ColorIndex.Value]);
+            yield return WaitFor(() => Vector3.Distance(local.transform.position, local.SpawnPosition) < 1.5f, 3f, "choosing myself sends me to my own start point");
+
+            // ---- G. 레이더 ----
+            local.TeleportTo(standAt, Quaternion.identity);
+            local.HeldItem.Value = (int)ItemType.Radar;
+            yield return new WaitForSeconds(0.6f);
+            yield return TapKey(Key.F);
+            yield return WaitFor(() => local.RadarActive, 3f, "the radar pulse reaches the caster");
+            var radar = HudNode("RadarMap");
+            int dots = 0;
+            for (int r = 0; r < 4; r++) if (HudNode("RadarMap/Map/Dot" + r).gameObject.activeSelf) dots++;
+            Check(radar.gameObject.activeSelf && dots == 4, $"the minimap shows all four players ({dots} dots)");
+            Check(PlayCount(ItemEffects.Radar) >= 1 && bots.TrueForAll(b => !b.IsStunnedNow), "the radar plays its effect and touches nobody");
+            yield return Shot("09_radar");
+            yield return new WaitForSeconds(1.4f);
+            Check(!local.RadarActive && !radar.gameObject.activeSelf, "the minimap disappears after about a second");
+
+            // ---- H. 재생성 ----
+            yield return WaitFor(() => ItemPickup.All.Count == total, 10f, "picked-up items respawn");
+            bool respawnOk = true;
+            foreach (var pickup in ItemPickup.All) respawnOk &= !starts.Contains(SpawnPlacer.CellAt(pickup.transform.position, cell));
+            Check(respawnOk, "respawned items stay off the start cells");
+
+            // 눈으로 확인용: 지금 있는 아이템 앞에서 하나씩 스크린샷을 남긴다.
+            var shown = new HashSet<ItemType>();
+            foreach (var pickup in ItemPickup.All.ToArray())
+            {
+                if (!shown.Add(pickup.Type)) continue;
+                Vector3 at = pickup.transform.position;
+                local.TeleportTo(new Vector3(at.x, 0.1f, at.z - 1.4f), Quaternion.identity);
+                yield return new WaitForSeconds(0.6f);
+                yield return Shot("12_pickup_" + pickup.Type);
+            }
+
+            // ---- I. 어려움 봇의 아이템 ----
+            BotBrain.StartDelayOverride = 0f;
+            BotBrain.SpeedMultiplier = 0f;
+            var picker = bots[2];
+            var spot = ItemPickup.All[0];
+            ulong spotId = spot.NetworkObjectId;
+            local.TeleportTo(local.SpawnPosition, Quaternion.identity);
+            picker.TeleportTo(new Vector3(spot.transform.position.x, 0.1f, spot.transform.position.z - 1f), Quaternion.identity);
+            yield return WaitFor(() => ItemPickup.FindByObjectId(spotId) == null, 5f, "a hard bot standing next to an item picks it up");
+            picker.HeldItem.Value = (int)ItemType.None;
+
+            var bot = bots[0];
+            foreach (var other in bots) if (other != bot) other.TeleportTo(other.SpawnPosition, Quaternion.identity);
+            local.TeleportTo(standAt, Quaternion.identity);
+            bot.TeleportTo(standAt + Vector3.forward * 3f, Quaternion.identity);
+            bot.HeldItem.Value = (int)ItemType.Lightning;
+            yield return WaitFor(() => local.IsStunnedNow, 5f, "a hard bot uses lightning when an enemy is near");
+            Check(bot.Held == ItemType.None, "the bot's slot is empty after using it");
+            yield return new WaitForSeconds(1.5f);
+
+            local.TeleportTo(standAt, Quaternion.identity);
+            bot.TeleportTo(standAt + Vector3.forward * 2.2f, Quaternion.identity);
+            bot.HeldItem.Value = (int)ItemType.Knife;
+            yield return WaitFor(() => local.IsStunnedNow, 5f, "a hard bot swings its knife at an enemy in reach");
+            yield return new WaitForSeconds(1.5f);
+
+            var botFlag = Flag.FindFor(bot.PlayerId);
+            Vector3 beside = PositionNextTo(botFlag, cell);
+            local.TeleportTo(beside, Quaternion.identity);
+            bot.TeleportTo(beside + Vector3.forward * 1.5f, Quaternion.identity);
+            bot.HeldItem.Value = (int)ItemType.GodsHand;
+            yield return WaitFor(() => Vector3.Distance(local.transform.position, local.SpawnPosition) < 1.5f, 5f, "a hard bot sends an enemy near its flag back to that enemy's start point");
+
+            BotBrain.StartDelayOverride = -1f;
+            BotBrain.SpeedMultiplier = 1f;
+            ItemSpawner.RespawnSecondsOverride = -1f;
+
+            yield return LeaveViaPauseMenu(FindAnyObjectByType<PauseMenu>());
+            yield return VerifyBackAtMenu(false);
         }
 
         private IEnumerator SoloHuntChecks()
@@ -792,6 +1002,7 @@ namespace Mirro.Testing
             if (_abort) yield break;
             var match = MatchManager.Instance;
             Check(match.CurrentMode == GameMode.Treasure && match.TotalTreasures.Value == total && NetworkPlayer.All.Count == 1, "treasure mode: one player and no bots");
+            Check(ItemPickup.All.Count == 0, "no item pickups exist in this mode");
 
             bool allGold = true, allTreasureIds = true;
             foreach (var flag in Flag.All)
@@ -849,6 +1060,7 @@ namespace Mirro.Testing
             var match = MatchManager.Instance;
             var local = NetworkPlayer.Local;
             Check(match.CurrentMode == GameMode.Practice && Flag.All.Count == 0 && NetworkPlayer.All.Count == 1, "practice: no flags and no other players");
+            Check(ItemPickup.All.Count == 0, "no item pickups exist in this mode");
             var label = HudNode("AliveLabel/Text").GetComponent<Text>();
             Check(label.text.StartsWith("자유 연습"), $"HUD names the practice mode (\"{label.text}\")");
 
@@ -887,6 +1099,12 @@ namespace Mirro.Testing
             var session = NetworkSession.Instance;
             int myIndex = SlotIndexOf(session, NetworkManager.Singleton.LocalClientId);
             Note($"my slot index = {myIndex}");
+
+            if (_scenario == "items")
+            {
+                yield return ItemMultiChecks(session);
+                yield break;
+            }
 
             // 관측 시작 시점의 위치/회전(모든 플레이어의 스폰 지점)을 기록한다.
             var firstPos = new Dictionary<ulong, Vector3>();
@@ -963,6 +1181,135 @@ namespace Mirro.Testing
 
             // 다시 하기 → 대기실 → 새 판 → (도중 중단 또는 다시 하기) → 대기실 → 방장이 나가면 참가자는 타이틀로.
             yield return RematchFlow(session, myIndex);
+        }
+
+        // ---- 멀티: 아이템 (2인, 복제/RPC 경로) ----
+
+        private static ItemPickup PickupAtSpot(int spot)
+        {
+            foreach (var pickup in ItemPickup.All) if (pickup.SpotIndex == spot) return pickup;
+            return null;
+        }
+
+        private IEnumerator ItemMultiChecks(NetworkSession session)
+        {
+            bool isHost = NetworkManager.Singleton.IsServer;
+            var local = NetworkPlayer.Local;
+            int total = ItemRules.SpotCount(_size);
+            if (isHost) ItemSpawner.RespawnSecondsOverride = 600f;
+            ItemEffects.PlayCounts.Clear();
+
+            yield return WaitFor(() => MatchManager.Instance != null && NetworkPlayer.All.Count == 2 && ItemPickup.All.Count == total
+                                       && MatchManager.Instance.StartTime.Value > 0.0, 30f, $"{total} item pickups are visible on this peer");
+            if (_abort) yield break;
+
+            ulong hostId = NetworkManager.ServerClientId;
+            ulong clientId = session.Slots[1].clientId;
+            var hostPlayer = NetworkPlayer.Find(hostId);
+            var clientPlayer = NetworkPlayer.Find(clientId);
+            var spots = new HashSet<int>();
+            foreach (var pickup in ItemPickup.All) spots.Add(pickup.SpotIndex);
+            Check(spots.Count == total && hostPlayer != null && clientPlayer != null, "every pickup has its own spot index on this peer");
+
+            // ---- A. 클라이언트가 실제 E로 줍는다 ----
+            yield return WaitMatchTime(6f);
+            var spot0 = PickupAtSpot(0);
+            ulong spot0Id = spot0.NetworkObjectId;
+            var spot0Type = spot0.Type;
+            if (!isHost) yield return PickUpWithKeyboard(spot0);
+            yield return WaitFor(() => ItemPickup.FindByObjectId(spot0Id) == null && clientPlayer.Held == spot0Type, 10f,
+                $"the client's {ItemInfo.DisplayName(spot0Type)} pickup is taken and visible on this peer");
+            Check(isHost ? PlayCount(ItemEffects.Pickup) == 0 : PlayCount(ItemEffects.Pickup) >= 1,
+                isHost ? "the host hears nothing for the client's pickup" : "the client's own pickup plays its effect");
+
+            // ---- B. 클라이언트가 번개를 쓴다 → 방장이 경직 ----
+            yield return WaitMatchTime(16f);
+            if (isHost) clientPlayer.HeldItem.Value = (int)ItemType.Lightning;
+            yield return WaitFor(() => clientPlayer.Held == ItemType.Lightning, 5f, "the client holds lightning on this peer");
+            if (!isHost) yield return TapKey(Key.F);
+            yield return WaitFor(() => hostPlayer.IsStunnedNow, 5f, "lightning from the client stuns the host (seen here)");
+            Check(!clientPlayer.IsStunnedNow, "the client who used lightning is not stunned");
+            Check(PlayCount(ItemEffects.Lightning) >= 1, "the stun effect played on this peer");
+            if (isHost)
+            {
+                Check(hostPlayer.controller.IsStunned, "the host's controller is blocked while stunned");
+                Vector3 p0 = local.transform.position;
+                yield return Hold(0.5f, Key.W);
+                Check(Vector3.Distance(p0, local.transform.position) < 0.1f, "the stunned host cannot move");
+            }
+
+            // ---- C. 방장이 신의 손으로 클라이언트를 그의 시작 지점으로 보낸다 ----
+            yield return WaitMatchTime(28f);
+            if (!isHost) local.TeleportTo(hostPlayer.SpawnPosition, Quaternion.identity);
+            yield return WaitFor(() => Vector3.Distance(clientPlayer.transform.position, clientPlayer.SpawnPosition) > 5f, 8f, "the client stands away from its start point");
+            if (isHost) hostPlayer.HeldItem.Value = (int)ItemType.GodsHand;
+            yield return WaitFor(() => hostPlayer.Held == ItemType.GodsHand, 5f, "the host holds God's Hand on this peer");
+            if (isHost)
+            {
+                yield return TapKey(Key.F);
+                Check(local.GetComponent<ItemUser>().TargetMenuOpen, "the host's target list opens");
+                yield return TapKey(DigitKeys[clientPlayer.ColorIndex.Value]);
+            }
+            yield return WaitFor(() => Vector3.Distance(clientPlayer.transform.position, clientPlayer.SpawnPosition) < 1.5f, 8f,
+                "God's Hand sends the client to its own start point (seen here)");
+            if (!isHost) Check(PlayCount(ItemEffects.GodsHand) >= 1, "the sent client sees the teleport effect");
+
+            // ---- D. 클라이언트가 레이더를 쓴다 ----
+            yield return WaitMatchTime(40f);
+            if (isHost) clientPlayer.HeldItem.Value = (int)ItemType.Radar;
+            yield return WaitFor(() => clientPlayer.Held == ItemType.Radar, 5f, "the client holds the radar on this peer");
+            if (!isHost)
+            {
+                yield return TapKey(Key.F);
+                yield return WaitFor(() => local.RadarActive, 5f, "the radar pulse reaches the client");
+                Check(HudNode("RadarMap").gameObject.activeSelf, "the client's minimap is shown");
+                yield return Shot("11_radar_client");
+            }
+            else
+            {
+                yield return new WaitForSeconds(0.6f);
+                Check(!local.RadarActive && !HudNode("RadarMap").gameObject.activeSelf, "the host's screen shows no minimap for the client's radar");
+            }
+            yield return WaitFor(() => clientPlayer.Held == ItemType.None, 5f, "the radar is used up on this peer");
+
+            // ---- E. 방장이 칼로 클라이언트를 벤다 ----
+            yield return WaitMatchTime(52f);
+            Vector3 hostSpot = hostPlayer.SpawnPosition;
+            local.TeleportTo(isHost ? hostSpot + new Vector3(0f, 0f, -0.5f) : hostSpot + new Vector3(0f, 0f, 1.2f), Quaternion.identity);
+            yield return new WaitForSeconds(1f);
+            if (isHost)
+            {
+                hostPlayer.HeldItem.Value = (int)ItemType.Knife;
+                // 쓰자마자 비워지면 클라이언트가 들고 있는 모습을 못 볼 수 있으니 잠깐 들고 있는다.
+                yield return new WaitForSeconds(1f);
+            }
+            yield return WaitFor(() => hostPlayer.Held == ItemType.Knife, 5f, "the host holds the knife on this peer");
+            if (isHost)
+            {
+                yield return TapKey(Key.F);
+                Check(PlayCount(ItemEffects.Knife) >= 1, "the host's knife swing plays locally");
+            }
+            yield return WaitFor(() => clientPlayer.IsStunnedNow, 5f, "the knife stuns the client (seen here)");
+            Check(!hostPlayer.IsStunnedNow, "the knife user is not stunned");
+            if (!isHost)
+            {
+                Check(local.controller.IsStunned, "the client's controller is blocked while stunned");
+                Vector3 p0 = local.transform.position;
+                yield return Hold(0.5f, Key.W);
+                Check(Vector3.Distance(p0, local.transform.position) < 0.1f, "the stunned client cannot move");
+            }
+
+            // ---- 마무리: 방장이 나가면 클라이언트는 타이틀로 ----
+            yield return WaitMatchTime(62f);
+            if (isHost)
+            {
+                yield return LeaveViaPauseMenu(FindAnyObjectByType<PauseMenu>());
+                yield return VerifyBackAtMenu(false);
+            }
+            else
+            {
+                yield return VerifyBackAtMenu(false);
+            }
         }
 
         // ---- 멀티: 재시작(다시 하기 / 로비로 돌아가기) ----
@@ -1346,6 +1693,30 @@ namespace Mirro.Testing
             var fill = HudNode("PullPrompt/Bar/Fill").GetComponent<RectTransform>();
             Check(fill.gameObject.activeSelf && fill.anchorMax.x > 0.2f, $"progress bar shows the progress (fill {fill.anchorMax.x:F2})");
             yield return Shot("10_pulling");
+        }
+
+        private static int PlayCount(string effect)
+        {
+            ItemEffects.PlayCounts.TryGetValue(effect, out int count);
+            return count;
+        }
+
+        /// <summary>아이템 앞(같은 칸 안 남쪽 1.4m)에서 북쪽을 보고 서서 실제 E 키로 줍는다.</summary>
+        private IEnumerator PickUpWithKeyboard(ItemPickup pickup)
+        {
+            var local = NetworkPlayer.Local;
+            ulong id = pickup.NetworkObjectId;
+            string name = pickup.DisplayName;
+            Vector3 at = pickup.transform.position;
+            local.TeleportTo(new Vector3(at.x, 0.1f, at.z - 1.4f), Quaternion.identity);
+            yield return new WaitForSeconds(0.8f);
+
+            Check((local.controller.LookTarget as ItemPickup) == pickup, $"looking at the {name} pickup makes it the interact target");
+            var prompt = HudNode("ItemPrompt");
+            Check(prompt != null && prompt.gameObject.activeSelf && prompt.Find("Text").GetComponent<Text>().text.Contains(name),
+                "the E prompt names the item");
+            yield return TapKey(Key.E);
+            yield return WaitFor(() => ItemPickup.FindByObjectId(id) == null, 5f, $"the {name} pickup is taken");
         }
 
         private IEnumerator MatchChecks(NetworkSession session, int myIndex)

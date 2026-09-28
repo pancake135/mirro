@@ -15,7 +15,7 @@ namespace Mirro.Items
     {
         public static readonly List<ItemPickup> All = new List<ItemPickup>();
 
-        private const float HoverHeight = 1.1f;
+        private const float HoverHeight = 1.3f;
 
         private int _type;
         private int _spot;
