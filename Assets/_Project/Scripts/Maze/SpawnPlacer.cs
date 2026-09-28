@@ -22,6 +22,8 @@ namespace Mirro.Maze
 
         private const int TreasureSeedSalt = 0x2545F491;
 
+        private const int ItemSeedSalt = 0x3C6EF372;
+
         private static readonly WallSide[] Sides = { WallSide.North, WallSide.East, WallSide.South, WallSide.West };
 
         /// <summary>
@@ -59,6 +61,58 @@ namespace Mirro.Maze
                 fromStart *= 0.8f;
             }
             return result.ToArray();
+        }
+
+        /// <summary>
+        /// 아이템 지점 칸을 count개 고른다. 서로 미로 한 변의 16% 이상, avoid(플레이어 시작 칸)에서 15% 이상 떨어진 무작위 칸이고
+        /// 자리가 모자라면 조건을 80%씩 낮춘다. (미로, count, avoid)만으로 결정되어 어느 피어에서 계산해도 같다.
+        /// </summary>
+        public static Vector2Int[] PlaceItemSpots(MazeData maze, int count, IReadOnlyList<Vector2Int> avoid)
+        {
+            count = Mathf.Clamp(count, 0, Mathf.Max(0, maze.Cells.Length - avoid.Count));
+            var result = new List<Vector2Int>(count);
+            var rng = new DeterministicRandom(maze.Seed ^ ItemSeedSalt);
+            for (int i = 0; i < 8; i++) rng.NextFloat01();
+
+            for (int i = 0; i < count; i++) result.Add(PickItemSpot(maze, avoid, result, rng));
+            return result.ToArray();
+        }
+
+        /// <summary>아이템 칸 하나를 고른다(재생성에도 쓴다). occupied는 지금 있는 다른 아이템 칸들.</summary>
+        public static Vector2Int PickItemSpot(MazeData maze, IReadOnlyList<Vector2Int> avoid, IReadOnlyList<Vector2Int> occupied,
+            DeterministicRandom rng)
+        {
+            float side = Mathf.Min(maze.Width, maze.Height);
+            float spacing = Mathf.Max(3f, side * 0.16f);
+            float fromStart = side * 0.15f;
+
+            for (int pass = 0; pass < 40; pass++)
+            {
+                for (int attempt = 0; attempt < 200; attempt++)
+                {
+                    var cell = new Vector2Int(rng.NextInt(0, maze.Width), rng.NextInt(0, maze.Height));
+                    if (IsAtLeast(cell, avoid, fromStart) && IsAtLeast(cell, occupied, spacing)) return cell;
+                }
+                spacing *= 0.8f;
+                fromStart *= 0.8f;
+            }
+
+            for (int y = 0; y < maze.Height; y++)
+            {
+                for (int x = 0; x < maze.Width; x++)
+                {
+                    var cell = new Vector2Int(x, y);
+                    if (IsAtLeast(cell, avoid, 0.5f) && IsAtLeast(cell, occupied, 0.5f)) return cell;
+                }
+            }
+            return Vector2Int.zero;
+        }
+
+        private static bool IsAtLeast(Vector2Int cell, IReadOnlyList<Vector2Int> others, float minDistance)
+        {
+            for (int i = 0; i < others.Count; i++)
+                if (Vector2Int.Distance(cell, others[i]) < minDistance) return false;
+            return true;
         }
 
         /// <summary>

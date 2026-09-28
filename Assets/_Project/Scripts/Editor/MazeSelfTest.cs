@@ -3,6 +3,7 @@ using System.Diagnostics;
 using UnityEditor;
 using UnityEngine;
 using Mirro.Gameplay;
+using Mirro.Items;
 using Mirro.Maze;
 using Debug = UnityEngine.Debug;
 
@@ -54,6 +55,7 @@ namespace Mirro.EditorTools
             allOk &= TestSpawnPlacement();
             allOk &= TestBots();
             allOk &= TestTreasures();
+            allOk &= TestItems();
 
             Debug.Log(allOk ? "[MirroTest] ALL PASSED" : "[MirroTest] SOME TESTS FAILED");
             return allOk;
@@ -345,6 +347,70 @@ namespace Mirro.EditorTools
                       && Mathf.Approximately(TreasureRecords.Best(probeSize), 100f);
             PlayerPrefs.DeleteKey(key);
             allOk &= Report(ok, "[MirroTest] treasure records keep only the best time");
+            return allOk;
+        }
+
+        /// <summary>아이템 지점 배치(개수/중복 없음/결정적/시작 칸 회피/재생성), 미니맵 벽 텍스처, 봇 아이템 플래그 검증.</summary>
+        private static bool TestItems()
+        {
+            bool allOk = true;
+            allOk &= Report(ItemRules.SpotCount(10) == 4 && ItemRules.SpotCount(30) == 5 && ItemRules.SpotCount(50) == 6,
+                "[MirroTest] items: spot counts are 4/5/6 for sizes 10/30/50");
+            allOk &= Report(!BotSettings.For(BotDifficulty.Easy).usesItems && !BotSettings.For(BotDifficulty.Normal).usesItems
+                            && BotSettings.For(BotDifficulty.Hard).usesItems, "[MirroTest] items: only hard bots use items");
+
+            foreach (int size in new[] { 10, 30, 50 })
+            {
+                int count = ItemRules.SpotCount(size);
+                int failures = 0;
+                for (int s = 1; s <= 25; s++)
+                {
+                    var maze = MazeGenerator.Generate(size, 7000 * size + s);
+                    var starts = SpawnPlacer.Place(maze, 4);
+                    var cells = SpawnPlacer.PlaceItemSpots(maze, count, starts);
+                    var again = SpawnPlacer.PlaceItemSpots(maze, count, starts);
+
+                    bool ok = cells.Length == count && new HashSet<Vector2Int>(cells).Count == count;
+                    for (int i = 0; ok && i < cells.Length; i++)
+                    {
+                        ok &= maze.InBounds(cells[i].x, cells[i].y) && cells[i] == again[i];
+                        foreach (var start in starts) ok &= cells[i] != start;
+                    }
+                    if (!ok) failures++;
+
+                    var rng = new Mirro.Core.DeterministicRandom(s * 31);
+                    var picked = SpawnPlacer.PickItemSpot(maze, starts, cells, rng);
+                    bool fresh = maze.InBounds(picked.x, picked.y);
+                    foreach (var c in cells) fresh &= c != picked;
+                    foreach (var st in starts) fresh &= st != picked;
+                    if (!fresh) failures++;
+                }
+                allOk &= Report(failures == 0, $"[MirroTest] items size {size}: {count} distinct, deterministic, off the start cells; respawn picks a free cell");
+            }
+
+            foreach (int size in new[] { 10, 50 })
+            {
+                var maze = MazeGenerator.Generate(size, 4242);
+                var texture = RadarMap.Bake(maze);
+                int px = RadarMap.PixelsPerCell(size);
+                bool ok = texture.width == size * px + 1 && texture.height == size * px + 1;
+                ok &= texture.GetPixel(0, px / 2).a > 0.99f;
+
+                bool openChecked = false;
+                for (int y = 0; y < size && !openChecked; y++)
+                {
+                    for (int x = 0; x + 1 < size; x++)
+                    {
+                        if (maze.HasWall(x, y, WallSide.East)) continue;
+                        ok &= texture.GetPixel((x + 1) * px, y * px + px / 2).a < 0.95f;
+                        openChecked = true;
+                        break;
+                    }
+                }
+                ok &= openChecked;
+                Object.DestroyImmediate(texture);
+                allOk &= Report(ok, $"[MirroTest] radar map {size}x{size}: size matches, outer wall drawn, passages left open");
+            }
             return allOk;
         }
 
