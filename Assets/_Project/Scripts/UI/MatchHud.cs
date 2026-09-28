@@ -4,6 +4,7 @@ using UnityEngine;
 using UnityEngine.UI;
 using Mirro.Core;
 using Mirro.Gameplay;
+using Mirro.Items;
 using Mirro.Networking;
 using Mirro.Themes;
 
@@ -19,6 +20,7 @@ namespace Mirro.UI
         private const int MaxToasts = 4;
         // 마지막 탈락 알림을 잠깐 보여준 뒤 결과 화면으로 넘어간다.
         private const float ResultDelaySeconds = 1.6f;
+        private const float RadarSize = 380f;
 
         private class Toast
         {
@@ -44,6 +46,18 @@ namespace Mirro.UI
         private RectTransform _spectate;
         private Text _spectateTitle;
         private Text _spectateSub;
+        private ItemUser _itemUser;
+        private RectTransform _itemBadge;
+        private Image _itemBadgeBg;
+        private Text _itemBadgeText;
+        private RectTransform _itemPrompt;
+        private Text _itemPromptText;
+        private RectTransform _godsHandMenu;
+        private readonly RectTransform[] _godsRows = new RectTransform[4];
+        private readonly Text[] _godsRowText = new Text[4];
+        private RectTransform _radar;
+        private readonly RectTransform[] _radarDots = new RectTransform[4];
+        private Texture2D _radarTexture;
         private readonly List<Toast> _toasts = new List<Toast>();
 
         public void Init(NetworkPlayer local, MazeThemeConfig theme)
@@ -51,7 +65,13 @@ namespace Mirro.UI
             _local = local;
             _theme = theme;
             _puller = local.GetComponent<FlagPuller>();
+            _itemUser = local.GetComponent<ItemUser>();
             Build();
+        }
+
+        private void OnDestroy()
+        {
+            if (_radarTexture != null) Destroy(_radarTexture);
         }
 
         private void Update()
@@ -67,6 +87,7 @@ namespace Mirro.UI
             UpdateAlive();
             UpdateToasts();
             UpdatePrompt();
+            UpdateItems();
             UpdateSpectateBanner();
             UpdateResult();
         }
@@ -124,6 +145,69 @@ namespace Mirro.UI
             float progress = _puller.Progress;
             _barFill.gameObject.SetActive(progress > 0.02f);
             _barFill.anchorMax = new Vector2(Mathf.Clamp01(progress), 1f);
+        }
+
+        /// <summary>소지 아이템 배지, "E: 줍기" 안내, 신의 손 대상 목록, 레이더 미니맵.</summary>
+        private void UpdateItems()
+        {
+            bool alive = _local.IsAlive.Value && !_match.Finished.Value;
+            var held = _local.Held;
+
+            _itemBadge.gameObject.SetActive(alive && held != ItemType.None);
+            if (_itemBadge.gameObject.activeSelf)
+            {
+                Color c = ItemInfo.ColorOf(held);
+                _itemBadgeBg.color = new Color(c.r * 0.55f, c.g * 0.55f, c.b * 0.55f, 0.88f);
+                _itemBadgeText.text = ItemInfo.DisplayName(held) + "    F: 사용";
+            }
+
+            var pickup = alive && _local.controller != null ? _local.controller.LookTarget as ItemPickup : null;
+            bool showPrompt = pickup != null && !_local.controller.IsPaused;
+            _itemPrompt.gameObject.SetActive(showPrompt);
+            if (showPrompt) _itemPromptText.text = "E 키로 줍기: " + pickup.DisplayName;
+
+            UpdateGodsHandMenu(alive);
+            UpdateRadar(alive);
+        }
+
+        private void UpdateGodsHandMenu(bool alive)
+        {
+            bool open = alive && _itemUser != null && _itemUser.TargetMenuOpen;
+            _godsHandMenu.gameObject.SetActive(open);
+            if (!open) return;
+
+            for (int i = 0; i < _godsRows.Length; i++)
+            {
+                var target = ItemUser.FindByColor(i);
+                _godsRows[i].gameObject.SetActive(target != null);
+                if (target == null) continue;
+
+                string suffix = target == _local ? " (나)" : target.IsBot ? " (봇)" : string.Empty;
+                _godsRowText[i].text = $"{i + 1}    {PlayerColors.GetName(i)}{suffix}";
+            }
+        }
+
+        private void UpdateRadar(bool alive)
+        {
+            var bootstrap = MazeGameBootstrap.Instance;
+            bool active = alive && _local.RadarActive && _radarTexture != null && bootstrap != null && bootstrap.Maze != null;
+            _radar.gameObject.SetActive(active);
+            if (!active) return;
+
+            float width = bootstrap.Maze.Width * bootstrap.CellSize;
+            float height = bootstrap.Maze.Height * bootstrap.CellSize;
+            for (int i = 0; i < _radarDots.Length; i++)
+            {
+                var target = ItemUser.FindByColor(i);
+                _radarDots[i].gameObject.SetActive(target != null);
+                if (target == null) continue;
+
+                Vector3 p = target.transform.position;
+                float nx = Mathf.Clamp01(p.x / width);
+                float ny = Mathf.Clamp01(p.z / height);
+                _radarDots[i].anchoredPosition = new Vector2((nx - 0.5f) * RadarSize, (ny - 0.5f) * RadarSize);
+                _radarDots[i].localScale = Vector3.one * (target == _local ? 1.4f : 1f);
+            }
         }
 
         private void UpdateSpectateBanner()
@@ -261,6 +345,68 @@ namespace Mirro.UI
             _spectateSub = UIFactory.AddLabel(_spectate, "Sub", string.Empty, 30, new Color(0.78f, 0.82f, 0.85f));
             UIFactory.SetBox(_spectateSub.rectTransform, new Vector2(0f, -36f), new Vector2(1460f, 50f));
             _spectate.gameObject.SetActive(false);
+
+            BuildItemUi();
+        }
+
+        private void BuildItemUi()
+        {
+            _itemBadge = UIFactory.NewRect("ItemBadge", _canvasRt);
+            UIFactory.SetBox(_itemBadge, new Vector2(700f, -450f), new Vector2(420f, 100f));
+            _itemBadgeBg = UIFactory.AddRounded(_itemBadge, new Color(0f, 0f, 0f, 0.6f), 40f);
+            _itemBadgeText = UIFactory.AddLabel(_itemBadge, "Text", string.Empty, 40, Color.white, FontStyle.Bold);
+            _itemBadge.gameObject.SetActive(false);
+
+            _itemPrompt = UIFactory.NewRect("ItemPrompt", _canvasRt);
+            UIFactory.SetBox(_itemPrompt, new Vector2(0f, -240f), new Vector2(720f, 90f));
+            UIFactory.AddRounded(_itemPrompt, new Color(0f, 0f, 0f, 0.55f), 36f);
+            _itemPromptText = UIFactory.AddLabel(_itemPrompt, "Text", string.Empty, 40, Color.white, FontStyle.Bold);
+            _itemPrompt.gameObject.SetActive(false);
+
+            _godsHandMenu = UIFactory.NewRect("GodsHandMenu", _canvasRt);
+            UIFactory.SetBox(_godsHandMenu, Vector2.zero, new Vector2(760f, 640f));
+            UIFactory.AddRounded(_godsHandMenu, new Color(0.10f, 0.08f, 0.16f, 0.9f), 48f);
+            var menuTitle = UIFactory.AddLabel(_godsHandMenu, "Title", "신의 손 — 시작 지점으로 보낼 사람의 번호", 38, ItemInfo.ColorOf(ItemType.GodsHand), FontStyle.Bold);
+            UIFactory.SetBox(menuTitle.rectTransform, new Vector2(0f, 268f), new Vector2(720f, 70f));
+            var menuHint = UIFactory.AddLabel(_godsHandMenu, "Hint", "F: 닫기", 30, new Color(0.78f, 0.82f, 0.85f));
+            UIFactory.SetBox(menuHint.rectTransform, new Vector2(0f, -272f), new Vector2(720f, 50f));
+            for (int i = 0; i < _godsRows.Length; i++)
+            {
+                var row = UIFactory.NewRect("Row" + i, _godsHandMenu);
+                UIFactory.SetBox(row, new Vector2(0f, 160f - 108f * i), new Vector2(660f, 92f));
+                UIFactory.AddRounded(row, new Color(0.18f, 0.15f, 0.26f), 36f);
+                var swatch = UIFactory.NewRect("Swatch", row);
+                UIFactory.SetBox(swatch, new Vector2(-280f, 0f), new Vector2(52f, 52f));
+                UIFactory.AddCircle(swatch, PlayerColors.Get(i));
+                var label = UIFactory.AddLabel(row, "Text", string.Empty, 44, Color.white, FontStyle.Bold);
+                label.alignment = TextAnchor.MiddleLeft;
+                UIFactory.SetBox(label.rectTransform, new Vector2(30f, 0f), new Vector2(520f, 70f));
+                _godsRows[i] = row;
+                _godsRowText[i] = label;
+            }
+            _godsHandMenu.gameObject.SetActive(false);
+
+            _radar = UIFactory.NewRect("RadarMap", _canvasRt);
+            UIFactory.SetBox(_radar, new Vector2(740f, 300f), new Vector2(RadarSize + 24f, RadarSize + 24f));
+            UIFactory.AddRounded(_radar, new Color(0.30f, 0.90f, 0.55f, 0.9f), 20f);
+            var mapRt = UIFactory.NewRect("Map", _radar);
+            UIFactory.SetBox(mapRt, Vector2.zero, new Vector2(RadarSize, RadarSize));
+            var bootstrap = MazeGameBootstrap.Instance;
+            if (bootstrap != null && bootstrap.Maze != null)
+            {
+                _radarTexture = RadarMap.Bake(bootstrap.Maze);
+                var image = mapRt.gameObject.AddComponent<RawImage>();
+                image.texture = _radarTexture;
+                image.raycastTarget = false;
+            }
+            for (int i = 0; i < _radarDots.Length; i++)
+            {
+                var dot = UIFactory.NewRect("Dot" + i, mapRt);
+                UIFactory.SetBox(dot, Vector2.zero, new Vector2(24f, 24f));
+                UIFactory.AddCircle(dot, PlayerColors.Get(i));
+                _radarDots[i] = dot;
+            }
+            _radar.gameObject.SetActive(false);
         }
     }
 }
