@@ -69,6 +69,13 @@ namespace Mirro.Gameplay
             var match = MatchManager.Instance;
             if (_planner == null || match == null || match.Finished.Value || !_player.IsAlive.Value) return;
 
+            // 경직 중에는 멈춘다(사람이 깃발 뽑기를 처음부터 다시 하듯 뽑던 진행도도 버린다).
+            if (_player.IsStunnedNow)
+            {
+                _pullTimer = 0f;
+                return;
+            }
+
             float delay = StartDelayOverride >= 0f ? StartDelayOverride : _settings.startDelay;
             if (match.Elapsed < delay) return;
 

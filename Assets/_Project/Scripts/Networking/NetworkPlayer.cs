@@ -278,6 +278,7 @@ namespace Mirro.Networking
         {
             Local = this;
             gameObject.AddComponent<FlagPuller>();
+            gameObject.AddComponent<ItemUser>();
             controller.enabled = true;
             playerCamera.enabled = true;
             playerCamera.tag = "MainCamera";
