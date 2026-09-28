@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using UnityEngine;
+using Mirro.Items;
 using Mirro.Maze;
 using Mirro.Networking;
 
@@ -17,6 +18,10 @@ namespace Mirro.Gameplay
         /// <summary>테스트용: 이동 속도 배율.</summary>
         public static float SpeedMultiplier = 1f;
 
+        /// <summary>테스트용: false면 어려움 봇도 아이템을 줍거나 쓰지 않는다.</summary>
+        public static bool ItemsEnabled = true;
+
+        private const float ItemCheckInterval = 0.25f;
         private const float AwarenessInterval = 0.5f;
         private const float ArriveDistance = 0.6f;
         private const float StuckCheckSeconds = 1.5f;
@@ -41,6 +46,9 @@ namespace Mirro.Gameplay
         private float _sidestepUntil;
         private float _sidestepSign = 1f;
         private float _verticalVelocity;
+        private ItemType _lastHeld = ItemType.None;
+        private float _heldSince;
+        private float _nextItemCheck;
 
         public void Init(NetworkPlayer player, MazeData maze, float cellSize, BotDifficulty difficulty, int seed)
         {
@@ -82,6 +90,7 @@ namespace Mirro.Gameplay
             Vector3 position = transform.position;
             int cell = CellIndexOf(position);
             _planner.MarkVisited(cell);
+            UpdateItems(match);
 
             if (_pullTarget != MatchManager.NoOne)
             {
@@ -122,6 +131,99 @@ namespace Mirro.Gameplay
             }
 
             Walk(toGoal / distance);
+        }
+
+        /// <summary>어려움 봇의 아이템: 지나가다 가까이 있으면 줍고(빈 슬롯일 때만), 상황이 맞으면 바로 쓴다.</summary>
+        private void UpdateItems(MatchManager match)
+        {
+            if (!ItemsEnabled || !_settings.usesItems || Time.time < _nextItemCheck) return;
+            _nextItemCheck = Time.time + ItemCheckInterval;
+
+            var held = _player.Held;
+            if (held != _lastHeld)
+            {
+                _lastHeld = held;
+                _heldSince = Time.time;
+            }
+
+            if (held == ItemType.None)
+            {
+                foreach (var pickup in ItemPickup.All)
+                {
+                    Vector3 delta = pickup.transform.position - transform.position;
+                    delta.y = 0f;
+                    if (delta.magnitude > ItemRules.BotPickupRange) continue;
+
+                    match.ServerRequestPickup(_player.PlayerId, pickup.NetworkObjectId);
+                    return;
+                }
+                return;
+            }
+
+            var nearest = NearestEnemy(out float nearestDistance);
+            switch (held)
+            {
+                case ItemType.Radar:
+                    // 이미 경로를 다 아는 봇에게는 쓸모가 없으니 바로 써서 슬롯을 비운다.
+                    match.ServerUseItem(_player.PlayerId, MatchManager.NoOne);
+                    break;
+                case ItemType.Lightning:
+                    if (nearest != null && nearestDistance <= ItemRules.BotEngageRange)
+                        match.ServerUseItem(_player.PlayerId, MatchManager.NoOne);
+                    break;
+                case ItemType.Knife:
+                    if (nearest != null && nearestDistance <= ItemRules.KnifeRange)
+                    {
+                        Vector3 look = nearest.transform.position - transform.position;
+                        look.y = 0f;
+                        if (look.sqrMagnitude > 0.0001f) transform.rotation = Quaternion.LookRotation(look);
+                        match.ServerUseItem(_player.PlayerId, MatchManager.NoOne);
+                    }
+                    break;
+                case ItemType.GodsHand:
+                    // 내 깃발 가까이 온 상대를 그의 시작 지점으로 쫓아낸다. 위협이 없으면 들고 있다가 시간이 지나면 내 깃발에 가장 가까운 상대에게 쓴다.
+                    var threat = EnemyNearestToMyFlag(out float threatDistance);
+                    if (threat != null && (threatDistance <= ItemRules.BotEngageRange || Time.time - _heldSince > ItemRules.BotGodsHandTimeout))
+                        match.ServerUseItem(_player.PlayerId, threat.PlayerId);
+                    break;
+            }
+        }
+
+        private NetworkPlayer NearestEnemy(out float distance)
+        {
+            NetworkPlayer best = null;
+            distance = float.MaxValue;
+            foreach (var other in NetworkPlayer.All)
+            {
+                if (other == _player || !other.IsSpawned || !other.IsAlive.Value) continue;
+
+                Vector3 delta = other.transform.position - transform.position;
+                delta.y = 0f;
+                if (delta.magnitude >= distance) continue;
+                distance = delta.magnitude;
+                best = other;
+            }
+            return best;
+        }
+
+        private NetworkPlayer EnemyNearestToMyFlag(out float distance)
+        {
+            distance = float.MaxValue;
+            var myFlag = Flag.FindFor(_player.PlayerId);
+            if (myFlag == null) return null;
+
+            NetworkPlayer best = null;
+            foreach (var other in NetworkPlayer.All)
+            {
+                if (other == _player || !other.IsSpawned || !other.IsAlive.Value) continue;
+
+                Vector3 delta = other.transform.position - myFlag.transform.position;
+                delta.y = 0f;
+                if (delta.magnitude >= distance) continue;
+                distance = delta.magnitude;
+                best = other;
+            }
+            return best;
         }
 
         private void Replan(int cell)
